@@ -32,18 +32,6 @@ void correctness_check(){
     }
 }
 
-void show_matrix(float *M){
-    for(int i= 0; i< N ;i++){
-        for(int j = 0; j< N ;j++){
-            printf("%.1f, ", M[i * N + j]);
-        }
-        printf("\n");
-    }
-}
-
-
-
-
 int main(int argc, char* argv[]){
     assert(argc==2);
     N = atoi(argv[1]);
@@ -71,9 +59,6 @@ int main(int argc, char* argv[]){
             }
         }
     }
-    
-    //show_matrix(C);
-
 
     correctness_check();
 
