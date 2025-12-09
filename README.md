@@ -1,6 +1,7 @@
 # PP25_final_project
 
 ## Test case
+`N` is a input argument `N = atoi(argv[1])`  
 ```
 int N;
 float *A, *B;
