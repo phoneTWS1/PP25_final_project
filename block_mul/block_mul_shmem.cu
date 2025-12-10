@@ -97,11 +97,6 @@ int main(int argc, char* argv[]){
     N = atoi(argv[1]);
     create_matrix();
 
-    float ms = 0, cpy = 0, cmp=0;
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-
     //int Bs = 32; // Block size
     int n = N / Bs;
     assert(N % Bs ==0);
@@ -115,17 +110,11 @@ int main(int argc, char* argv[]){
     cudaMalloc((void **)&d_C, gmem);
     
     // cuda Memory copy
-    cudaEventRecord(start);
     cudaMemcpy(d_A, A, gmem, cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, B, gmem, cudaMemcpyHostToDevice);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&ms, start, stop);
-    cpy += ms;
 
 
     //launch kernel
-    cudaEventRecord(start);
     size_t shmem = Bs * Bs * 2 * sizeof(float);
     block_mul_kernel<<<dim3(n,n), dim3(Bs,Bs), shmem>>>(
         N,
@@ -134,32 +123,16 @@ int main(int argc, char* argv[]){
         d_B,
         d_C
     );
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&ms, start, stop);
-    cmp += ms;
     
     //cuda Memory copy
-    cudaEventRecord(start);
-    cudaMemcpy(C, d_C, gmem, cudaMemcpyDeviceToHost);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&ms, start, stop);
-    cpy += ms;
-    
+    cudaMemcpy(C, d_C, gmem, cudaMemcpyDeviceToHost);    
 
     //free cuda memeory
     cudaFree(d_A);
     cudaFree(d_B);
     cudaFree(d_C);
 
-
-    correctness_check();
-
-    printf("computation: %f s\n", cmp*1e-3);
-    printf("mem copy: %f s\n", cpy*1e-3);
-    printf("total: %f s\n", (cmp + cpy)*1e-3);
-
+   correctness_check();
 
     
     return 0;
