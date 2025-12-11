@@ -20,8 +20,8 @@ __inline__ __device__ float warpReduceSum(float val) {
     return val;
 }
 // every wrap is reposible for 4 row of a C tile
-// every thread is reposible for 4 rows elements (same column)
-// grid = dim3(n,n), block = dim3(32,8)
+// every thread is reposible for 2 rows and 2 cols elements 
+// grid = dim3(n,n), block = dim3(16,16)
 __global__ void block_mul_kernel(
     int N,
     int n,
@@ -42,12 +42,17 @@ __global__ void block_mul_kernel(
     int B_start_col = by * Bs;
     
     // block local index
-    int lx = threadIdx.y; // threadIdx.y = 0...7, 
-    int ly = threadIdx.x; // threadIdx.x = 0...31
-    int wrap_row = lx * 4;
+    int lx = threadIdx.y; // threadIdx.y = 0...15
+    int ly = threadIdx.x; // threadIdx.x = 0...15
+    int stride = blockDim.y;
+    int row0 = lx * Bs;
+    int row1 = (lx + stride) * Bs;
+    int col0 = ly;
+    int col1 = (ly + stride);
+    int grow = lx + stride;
 
-
-    float c0=0, c1=0, c2=0, c3=0;
+    float c00=0, c01=0, c10=0, c11=0;
+    float a0, a1, b0, b1;
 
     // compute c
     for(int bk = 0; bk< n ; bk++){
@@ -55,41 +60,40 @@ __global__ void block_mul_kernel(
         B_start_row = bk * Bs;
         
         // load A, B block
-        A_block[wrap_row * Bs + ly] = d_A[(A_start_row + wrap_row) * N + A_start_col + ly];
-        A_block[(wrap_row + 1) * Bs + ly] = d_A[(A_start_row + wrap_row + 1) * N + A_start_col + ly];
-        A_block[(wrap_row + 2) * Bs + ly] = d_A[(A_start_row + wrap_row + 2) * N + A_start_col + ly];
-        A_block[(wrap_row + 3) * Bs + ly] = d_A[(A_start_row + wrap_row + 3) * N + A_start_col + ly];
+        A_block[row0 + col0] = d_A[(A_start_row + lx) * N + A_start_col + col0];
+        A_block[row0 + col1] = d_A[(A_start_row + lx) * N + A_start_col + col1];
+        A_block[row1 + col0] = d_A[(A_start_row + grow) * N + A_start_col + col0];
+        A_block[row1 + col1] = d_A[(A_start_row + grow) * N + A_start_col + col1];
 
-        B_block[wrap_row * Bs + ly] = d_B[(B_start_row + wrap_row) * N + B_start_col + ly];
-        B_block[(wrap_row + 1) * Bs + ly] = d_B[(B_start_row + wrap_row + 1) * N + B_start_col + ly];
-        B_block[(wrap_row + 2) * Bs + ly] = d_B[(B_start_row + wrap_row + 2) * N + B_start_col + ly];
-        B_block[(wrap_row + 3) * Bs + ly] = d_B[(B_start_row + wrap_row + 3) * N + B_start_col + ly];
+        B_block[row0 + col0] = d_B[(B_start_row + lx) * N + B_start_col + col0];
+        B_block[row0 + col1] = d_B[(B_start_row + lx) * N + B_start_col + col1];
+        B_block[row1 + col0] = d_B[(B_start_row + grow) * N + B_start_col + col0];
+        B_block[row1 + col1] = d_B[(B_start_row + grow) * N + B_start_col + col1];
 
         __syncthreads();
         
         #pragma unroll 32
         for(int k = 0 ; k < Bs ; k ++){
-            float b = B_block[k * Bs + ly];
-            float a0 = A_block[(wrap_row * Bs) + k];
-            float a1 = A_block[(wrap_row + 1) * Bs + k];
-            float a2 = A_block[(wrap_row + 2) * Bs + k];
-            float a3 = A_block[(wrap_row + 3) * Bs + k];
+            a0 = A_block[row0 + k];
+            a1 = A_block[row1 + k];
+            b0 = B_block[k * Bs + col0];
+            b1 = B_block[k * Bs + col1];
 
-            // 4FMAs, 5 shared load  =>  0.8 FMAs/load;
-            c0 += a0 * b;
-            c1 += a1 * b;
-            c2 += a2 * b;
-            c3 += a3 * b;
+            c00 += a0 * b0;
+            c01 += a0 * b1;
+            c10 += a1 * b0;
+            c11 += a1 * b1;
         }
 
         __syncthreads();
     }
 
     //write back
-    d_C[(A_start_row + wrap_row) * N + B_start_col + ly] = c0;
-    d_C[(A_start_row + wrap_row + 1) * N + B_start_col + ly] = c1;
-    d_C[(A_start_row + wrap_row + 2) * N + B_start_col + ly] = c2;
-    d_C[(A_start_row + wrap_row + 3) * N + B_start_col + ly] = c3;
+    d_C[(A_start_row + lx) * N + B_start_col + col0] = c00;
+    d_C[(A_start_row + lx) * N + B_start_col + col1] = c01;
+    d_C[(A_start_row + grow) * N + B_start_col + col0] = c10;
+    d_C[(A_start_row + grow) * N + B_start_col + col1] = c11;
+
 }
 
 int main(int argc, char* argv[]){
@@ -119,7 +123,7 @@ int main(int argc, char* argv[]){
 
     //launch kernel
     size_t shmem = Bs * Bs * 2 * sizeof(float);
-    block_mul_kernel<<<dim3(n,n), dim3(Bs,8), shmem>>>(
+    block_mul_kernel<<<dim3(n,n), dim3(16,16), shmem>>>(
         N,
         n,
         d_A,

@@ -47,9 +47,8 @@ __global__ void block_mul_kernel(
     int warp_row = lx * 8;
 
 
-    float c[8];
-    #pragma unroll 8
-    for(int i = 0; i< 8; i++) c[i] = 0;
+    float c0=0, c1=0, c2=0, c3=0, c4=0, c5=0, c6=0, c7=0;
+    float a0=0, a1=0, a2=0, a3=0, a4=0, a5=0, a6=0, a7=0;
 
    // compute c
     for(int bk = 0; bk< n ; bk++){
@@ -57,31 +56,64 @@ __global__ void block_mul_kernel(
         B_start_row = bk * Bs;
         
         // load A, B block
-        #pragma unroll 8
-        for(int i = 0 ; i < 8; i++){
-            A_block[(warp_row + i) * Bs + ly] = d_A[(A_start_row + warp_row + i) * N + A_start_col + ly];
-            B_block[(warp_row + i) * Bs + ly] = d_B[(B_start_row + warp_row + i) * N + B_start_col + ly];
+        A_block[warp_row * Bs + ly] = d_A[(A_start_row + warp_row) * N + A_start_col + ly];
+        A_block[(warp_row + 1) * Bs + ly] = d_A[(A_start_row + warp_row + 1) * N + A_start_col + ly];
+        A_block[(warp_row + 2) * Bs + ly] = d_A[(A_start_row + warp_row + 2) * N + A_start_col + ly];
+        A_block[(warp_row + 3) * Bs + ly] = d_A[(A_start_row + warp_row + 3) * N + A_start_col + ly];
+        A_block[(warp_row + 4) * Bs + ly] = d_A[(A_start_row + warp_row + 4) * N + A_start_col + ly];
+        A_block[(warp_row + 5) * Bs + ly] = d_A[(A_start_row + warp_row + 5) * N + A_start_col + ly];
+        A_block[(warp_row + 6) * Bs + ly] = d_A[(A_start_row + warp_row + 6) * N + A_start_col + ly];
+        A_block[(warp_row + 7) * Bs + ly] = d_A[(A_start_row + warp_row + 7) * N + A_start_col + ly];
 
-        }
+        B_block[warp_row * Bs + ly] = d_B[(B_start_row + warp_row) * N + B_start_col + ly];
+        B_block[(warp_row + 1) * Bs + ly] = d_B[(B_start_row + warp_row + 1) * N + B_start_col + ly];
+        B_block[(warp_row + 2) * Bs + ly] = d_B[(B_start_row + warp_row + 2) * N + B_start_col + ly];
+        B_block[(warp_row + 3) * Bs + ly] = d_B[(B_start_row + warp_row + 3) * N + B_start_col + ly];
+        B_block[(warp_row + 4) * Bs + ly] = d_B[(B_start_row + warp_row + 4) * N + B_start_col + ly];
+        B_block[(warp_row + 5) * Bs + ly] = d_B[(B_start_row + warp_row + 5) * N + B_start_col + ly];
+        B_block[(warp_row + 6) * Bs + ly] = d_B[(B_start_row + warp_row + 6) * N + B_start_col + ly];
+        B_block[(warp_row + 7) * Bs + ly] = d_B[(B_start_row + warp_row + 7) * N + B_start_col + ly];
+
+    
         __syncthreads();
         
+        #pragma unroll 32
         for(int k = 0 ; k < Bs ; k ++){
             float b = B_block[k * Bs + ly];
             // 8 FMAs 9 load => 0.888 FMAs per load
-            #pragma unroll 8
-            for(int i=0 ; i < 8 ; i++){
-                c[i] += A_block[(warp_row + i) * Bs + k] * b;
-            }
-        }
+            a0 = A_block[(warp_row * Bs) + k];
+            a1 = A_block[(warp_row + 1) * Bs + k];
+            a2 = A_block[(warp_row + 2) * Bs + k];
+            a3 = A_block[(warp_row + 3) * Bs + k];
+            a4 = A_block[(warp_row + 4) * Bs + k];
+            a5 = A_block[(warp_row + 5) * Bs + k];
+            a6 = A_block[(warp_row + 6) * Bs + k];
+            a7 = A_block[(warp_row + 7) * Bs + k];
 
+            c0 += a0 * b;
+            c1 += a1 * b;
+            c2 += a2 * b;
+            c3 += a3 * b;
+            c4 += a4 * b;
+            c5 += a5 * b;
+            c6 += a6 * b;
+            c7 += a7 * b;
+            
+            
+        }
         __syncthreads();
     }
 
     //write back
-    #pragma unroll 8
-    for(int i = 0; i < 8 ; i++){
-        d_C[(A_start_row + warp_row + i) * N + B_start_col + ly] = c[i];
-    }
+    d_C[(A_start_row + warp_row) * N + B_start_col + ly] = c0;
+    d_C[(A_start_row + warp_row + 1) * N + B_start_col + ly] = c1;
+    d_C[(A_start_row + warp_row + 2) * N + B_start_col + ly] = c2;
+    d_C[(A_start_row + warp_row + 3) * N + B_start_col + ly] = c3;
+    d_C[(A_start_row + warp_row + 4) * N + B_start_col + ly] = c4;
+    d_C[(A_start_row + warp_row + 5) * N + B_start_col + ly] = c5;
+    d_C[(A_start_row + warp_row + 6) * N + B_start_col + ly] = c6;
+    d_C[(A_start_row + warp_row + 7) * N + B_start_col + ly] = c7;
+
 }
 
 int main(int argc, char* argv[]){
