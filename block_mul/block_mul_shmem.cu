@@ -58,7 +58,7 @@ __global__ void block_mul_kernel(
     int B_start_row;
     int B_start_col = by * Bs;
     
-    // block local index
+    // block local index                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
     int lx = threadIdx.x;
     int ly = threadIdx.y;
     int idx = lx * Bs + ly;

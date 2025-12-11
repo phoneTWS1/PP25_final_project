@@ -79,6 +79,7 @@ __global__ void block_mul_kernel(
         // compute c
         #pragma unroll 32
         for(int k = 0; k < Bs; k++){
+            // 1FMAs, 2 shared load  =>  0.5 FMAs/load;
             c += A_block[lx * Bs + k] * B_block[ k * Bs + ly];
         }
 
@@ -100,7 +101,7 @@ int main(int argc, char* argv[]){
     //int Bs = 32; // Block size
     int n = N / Bs;
     assert(N % Bs ==0);
-
+ 
     // cudaMalloc
     float *d_A, *d_B, *d_C;
     size_t gmem = N * N *  sizeof(float);

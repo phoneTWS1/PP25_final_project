@@ -86,6 +86,7 @@ GPU activities:   85.88%  66.219ms         1  66.219ms  66.219ms  66.219ms  bloc
                     4.60%  3.5473ms         1  3.5473ms  3.5473ms  3.5473ms  [CUDA memcpy DtoH]
 
 </pre>
+
 - `block_mul_shmem.cu`:
 <pre style="overflow-x:auto; white-space:pre;">
 ==2940490== Metric result:
@@ -108,6 +109,7 @@ GPU activities:   58.20%  14.895ms         1  14.895ms  14.895ms  14.895ms  bloc
                 27.88%  7.1347ms         2  3.5674ms  3.5092ms  3.6255ms  [CUDA memcpy HtoD]
                 13.92%  3.5626ms         1  3.5626ms  3.5626ms  3.5626ms  [CUDA memcpy DtoH]
 </pre>
+From `gld_transactions_per_request`,`global_load_requests`and`gld_transactions` we can see that every wrap load request require multiple transaction. This is because in the 
 - `block_mul_coal.cu`:
 <pre style="overflow-x:auto; white-space:pre;">
 ==2940530== Metric result:
@@ -134,4 +136,4 @@ In the kernel, global memory is only accessed when loading a new A/B tile; all t
 Therefore kernel already has decent arithmetic intensity (a lot of FLOPs per global load). In this situation, improving coalescing on those tile loads is still good and can give some speedup, but it won’t transform performance by 10× because global memory isn’t the dominant cost anymore. 
 
 The real performance gain is from reusing shared mmemory. Each A/B element is loaded once from global but reused many times from shared memory, and that reuse is what primarily accelerates the code compared to a naive pure-global-memory version.
-- `block_mul_bank.cu`:
+- `block_mul_wrap.cu`:
