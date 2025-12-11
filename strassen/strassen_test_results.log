@@ -1,0 +1,67 @@
+--- 矩陣乘法測試腳本 ---
+測試時間: Fri Dec 12 03:26:54 AM CST 2025
+執行模式: seq
+測試維度: 64 128 256 512 1024 2048 4096
+---
+-> 編譯程式...
+
+--- 測試 N=64 ---
+-> 執行 seq: ./strassen_seq 64 ../dataset/A_64 ../dataset/B_64 ../dataset/C_64
+Loading data for N=64...
+Compute time : 0.000095 s
+Maximum error: 0.000013
+SUCCESS: Result matches loaded answer C.
+
+--- 測試 N=128 ---
+-> 執行 seq: ./strassen_seq 128 ../dataset/A_128 ../dataset/B_128 ../dataset/C_128
+Loading data for N=128...
+Compute time : 0.000936 s
+Maximum error: 0.000034
+SUCCESS: Result matches loaded answer C.
+
+--- 測試 N=256 ---
+-> 執行 seq: ./strassen_seq 256 ../dataset/A_256 ../dataset/B_256 ../dataset/C_256
+Loading data for N=256...
+Compute time : 0.009851 s
+Maximum error: 0.000114
+SUCCESS: Result matches loaded answer C.
+
+--- 測試 N=512 ---
+-> 執行 seq: ./strassen_seq 512 ../dataset/A_512 ../dataset/B_512 ../dataset/C_512
+Loading data for N=512...
+Compute time : 0.092629 s
+Maximum error: 0.000320
+SUCCESS: Result matches loaded answer C.
+
+--- 測試 N=1024 ---
+-> 執行 seq: ./strassen_seq 1024 ../dataset/A_1024 ../dataset/B_1024 ../dataset/C_1024
+Loading data for N=1024...
+Compute time : 1.982696 s
+Maximum error: 0.001099
+SUCCESS: Result matches loaded answer C.
+
+--- 測試 N=2048 ---
+-> 執行 seq: ./strassen_seq 2048 ../dataset/A_2048 ../dataset/B_2048 ../dataset/C_2048
+Loading data for N=2048...
+Compute time : 40.561339 s
+Maximum error: 0.002869
+SUCCESS: Result matches loaded answer C.
+
+--- 測試 N=4096 ---
+-> 執行 seq: ./strassen_seq 4096 ../dataset/A_4096 ../dataset/B_4096 ../dataset/C_4096
+Mismatch at index 10: Result=1007.516479, True=1007.519897, Error=0.003418
+Mismatch at index 33: Result=1023.990112, True=1023.993286, Error=0.003174
+Mismatch at index 72: Result=1043.187012, True=1043.183594, Error=0.003418
+Mismatch at index 90: Result=1018.069397, True=1018.065430, Error=0.003967
+Mismatch at index 102: Result=1012.486389, True=1012.482544, Error=0.003845
+Mismatch at index 121: Result=1024.268066, True=1024.272095, Error=0.004028
+Mismatch at index 148: Result=1019.197021, True=1019.193665, Error=0.003357
+Mismatch at index 187: Result=1016.733643, True=1016.736938, Error=0.003296
+Mismatch at index 192: Result=1020.615601, True=1020.620239, Error=0.004639
+Mismatch at index 226: Result=1030.574585, True=1030.571167, Error=0.003418
+Loading data for N=4096...
+Compute time : 386.398695 s
+Maximum error: 0.008545
+FAILED: Result mismatch with loaded answer C. Total errors: 571391
+
+--- 測試完成 ---
