@@ -1,0 +1,20 @@
+==3015424== NVPROF is profiling process 3015424, command: exe/bm_8w 2048
+==3015424== Profiling application: exe/bm_8w 2048
+==3015424== Profiling result:
+            Type  Time(%)      Time     Calls       Avg       Min       Max  Name
+ GPU activities:   40.49%  7.4594ms         1  7.4594ms  7.4594ms  7.4594ms  block_mul_kernel(int, int, float*, float*, float*)
+                   39.42%  7.2616ms         2  3.6308ms  3.6011ms  3.6605ms  [CUDA memcpy HtoD]
+                   20.09%  3.7014ms         1  3.7014ms  3.7014ms  3.7014ms  [CUDA memcpy DtoH]
+      API calls:   84.93%  119.90ms         3  39.966ms  71.648us  119.74ms  cudaMalloc
+                   13.61%  19.221ms         3  6.4070ms  3.8201ms  11.557ms  cudaMemcpy
+                    1.15%  1.6218ms         3  540.61us  470.36us  660.11us  cudaFree
+                    0.11%  153.27us       114  1.3440us      93ns  64.774us  cuDeviceGetAttribute
+                    0.11%  151.77us         1  151.77us  151.77us  151.77us  cudaLaunchKernel
+                    0.08%  112.95us         1  112.95us  112.95us  112.95us  cudaGetDeviceProperties
+                    0.01%  11.664us         1  11.664us  11.664us  11.664us  cuDeviceGetName
+                    0.01%  7.2020us         1  7.2020us  7.2020us  7.2020us  cuDeviceGetPCIBusId
+                    0.00%  1.3910us         3     463ns     113ns  1.1290us  cuDeviceGetCount
+                    0.00%     473ns         2     236ns     101ns     372ns  cuDeviceGet
+                    0.00%     373ns         1     373ns     373ns     373ns  cuDeviceTotalMem
+                    0.00%     301ns         1     301ns     301ns     301ns  cuModuleGetLoadingMode
+                    0.00%     225ns         1     225ns     225ns     225ns  cuDeviceGetUuid

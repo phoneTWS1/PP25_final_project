@@ -19,9 +19,9 @@ __inline__ __device__ float warpReduceSum(float val) {
         val += __shfl_down_sync(0xffffffff, val, offset);
     return val;
 }
-// every wrap is reposible for 8 row of a C tile
-// every thread is reposible for 8 rows elements (same column)
-// grid = dim3(n,n), block = dim3(32,2)
+// every wrap is reposible for 4 row of a C tile
+// every thread is reposible for 4 * 4 (same column)
+// grid = dim3(n,n), block = dim3(8,8)
 __global__ void block_mul_kernel(
     int N,
     int n,
@@ -42,15 +42,21 @@ __global__ void block_mul_kernel(
     int B_start_col = by * Bs;
     
     // block local index
-    int lx = threadIdx.y; // threadIdx.y = 0...7, 
-    int ly = threadIdx.x; // threadIdx.x = 0...31
-    int warp_row = lx * 16;
+    int lx = threadIdx.y; // threadIdx.y = 0...8, 
+    int ly = threadIdx.x; // threadIdx.x = 0...8
+    int stride = blockDim.y;
 
 
-    float c[16];
-    
-    #pragma unroll 16
-    for(int i = 0; i< 16; i++) c[i] = 0;
+    float c[4][4];
+    #pragma unroll 4
+    for(int i=0; i<4; i++){
+        #pragma unroll 4
+        for(int j=0 ; j< 4; j++){
+            c[i][j] = 0;
+        }
+    }
+
+    float b[4], a[4];
     
    // compute c
     for(int bk = 0; bk< n ; bk++){
@@ -58,29 +64,51 @@ __global__ void block_mul_kernel(
         B_start_row = bk * Bs;
         
         // load A, B block
-        #pragma unroll 16
-        for(int i = 0 ; i < 16; i++){
-            A_block[(warp_row + i) * Bs + ly] = d_A[(A_start_row + warp_row + i) * N + A_start_col + ly];
-            B_block[(warp_row + i) * Bs + ly] = d_B[(B_start_row + warp_row + i) * N + B_start_col + ly];
-
-        }
-        __syncthreads();
-        for(int k = 0 ; k < Bs ; k ++){
-            float b = B_block[k * Bs + ly];
-            // 16 FMAs 17 load => 0.9412 FMAs per load
-            #pragma unroll 16
-            for(int i=0 ; i < 16 ; i++){
-                c[i] += A_block[(warp_row + i) * Bs + k] * b;
+        #pragma unroll 4
+        for(int i = 0 ; i < 4; i++){
+            #pragma unroll 4
+            for(int j = 0; j < 4; j++){
+                A_block[(lx + i * stride) * Bs + (ly + j * stride)] = d_A[(A_start_row + lx + i * stride) * N + (A_start_col + ly + j * stride)];
+                B_block[(lx + i * stride) * Bs + (ly + j * stride)] = d_B[(B_start_row + lx + i * stride) * N + (B_start_col + ly + j * stride)];
             }
         }
 
         __syncthreads();
+
+        #pragma unroll 32
+        for(int k = 0 ; k < Bs ; k ++){
+            // load a's
+            #pragma unroll 4
+            for(int i = 0 ; i < 4 ; i++){
+                a[i] = A_block[(lx + i * stride) * Bs + k];
+            }
+
+            // load b's
+            #pragma unroll 4
+            for(int j = 0 ; j < 4 ; j++){
+                b[j] = B_block[k * Bs + ly + j * stride];
+            }
+            
+            #pragma unroll 4
+            for(int i = 0; i < 4 ; i++){
+                #pragma unroll 4
+                for(int j = 0 ; j < 4 ; j ++){
+                    c[i][j] += a[i] * b[j];
+                }
+            }
+
+        }
+        __syncthreads();
+
     }
 
     //write back
-    #pragma unroll 16
-    for(int i = 0; i < 16 ; i++){
-        d_C[(A_start_row + warp_row + i) * N + B_start_col + ly] = c[i];
+    #pragma unroll 4
+    for(int i = 0; i < 4 ; i++){
+        #pragma unroll 4
+        for(int j = 0 ; j < 4 ; j++){
+            d_C[(A_start_row + lx + i * stride) * N + (B_start_col + ly + j * stride)] = c[i][j];
+        }
     }
 }
 
@@ -111,7 +139,7 @@ int main(int argc, char* argv[]){
 
     //launch kernel
     size_t shmem = Bs * Bs * 2 * sizeof(float);
-    block_mul_kernel<<<dim3(n,n), dim3(Bs,2), shmem>>>(
+    block_mul_kernel<<<dim3(n,n), dim3(8,8), shmem>>>(
         N,
         n,
         d_A,
