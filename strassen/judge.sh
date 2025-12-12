@@ -1,15 +1,16 @@
-# ...existing code...
 #!/bin/bash
 
 # Usage:
-#   ./judge.sh [seq|par|both]
+#   ./judge.sh [seq|par|block|both|all]
 #   or set env vars: SRUN, NVPROF, MODE
 # Example:
 #   MODE=par NVPROF=nvprof ./judge.sh par
 #   SRUN="" ./judge.sh par    # disable srun prefix
 
+module load rocm cuda
+
 MODE_ARG="$1"
-MODE="${MODE_ARG:-${MODE:-both}}"   # seq, par, or both (default both)
+MODE="${MODE_ARG:-${MODE:-both}}"   # seq, par, block, both (seq+par), all (seq+par+block)
 
 # SRUN prefix for GPU runs (can be overridden outside)
 SRUN=${SRUN:-"srun -p nvidia -n1 --gres=gpu:1"}
@@ -24,6 +25,7 @@ TEST_DIMENSIONS=(64 128 256 512 1024 2048 4096 8192 16384)
 DATA_DIR="../dataset"
 STRASSEN_PAR_EXE="./strassen_par"
 STRASSEN_SEQ_EXE="./strassen_seq"
+BLOCK_PAR_EXE="./block_par"
 
 LOG_FILE="strassen_test_results.log"
 
@@ -33,25 +35,44 @@ echo "執行模式: $MODE" | tee -a $LOG_FILE
 echo "測試維度: ${TEST_DIMENSIONS[*]}" | tee -a $LOG_FILE
 echo "---" | tee -a $LOG_FILE
 
-# 編譯（同時編譯 seq 與 par）
+# 編譯（同時編譯 seq、par、block）
 echo "-> 編譯程式..." | tee -a $LOG_FILE
 make clean
-make strassen_par strassen_seq
+# 嘗試同時編譯三個 target（若 Makefile 沒有 block_par 會顯示錯誤）
+make strassen_par strassen_seq block_par
 if [ $? -ne 0 ]; then
     echo "錯誤: 編譯失敗" | tee -a $LOG_FILE
     exit 1
 fi
 
 # 檢查執行檔
-if [[ "$MODE" == "seq" || "$MODE" == "both" ]]; then
+need_seq=false; need_par=false; need_block=false
+case "$MODE" in
+  seq) need_seq=true ;;
+  par) need_par=true ;;
+  block) need_block=true ;;
+  both) need_seq=true; need_par=true ;;
+  all) need_seq=true; need_par=true; need_block=true ;;
+  *) 
+    echo "未知模式: $MODE. 可選：seq|par|block|both|all" | tee -a $LOG_FILE
+    exit 1 ;;
+esac
+
+if $need_seq; then
     if [ ! -x "$STRASSEN_SEQ_EXE" ]; then
         echo "錯誤: 找不到可執行檔 $STRASSEN_SEQ_EXE" | tee -a $LOG_FILE
         exit 1
     fi
 fi
-if [[ "$MODE" == "par" || "$MODE" == "both" ]]; then
+if $need_par; then
     if [ ! -x "$STRASSEN_PAR_EXE" ]; then
         echo "錯誤: 找不到可執行檔 $STRASSEN_PAR_EXE" | tee -a $LOG_FILE
+        exit 1
+    fi
+fi
+if $need_block; then
+    if [ ! -x "$BLOCK_PAR_EXE" ]; then
+        echo "錯誤: 找不到可執行檔 $BLOCK_PAR_EXE" | tee -a $LOG_FILE
         exit 1
     fi
 fi
@@ -72,7 +93,7 @@ for N in "${TEST_DIMENSIONS[@]}"; do
     fi
 
     # run sequential
-    if [[ "$MODE" == "seq" || "$MODE" == "both" ]]; then
+    if $need_seq; then
         echo "-> 執行 seq: $STRASSEN_SEQ_EXE $N $A_FILE $B_FILE $C_TRUE_FILE" | tee -a $LOG_FILE
         CMD_SEQ="${NVPROF:+$NVPROF }${STRASSEN_SEQ_EXE} \"$N\" \"$A_FILE\" \"$B_FILE\" \"$C_TRUE_FILE\""
         eval $CMD_SEQ 2>&1 | tee -a $LOG_FILE
@@ -81,25 +102,39 @@ for N in "${TEST_DIMENSIONS[@]}"; do
         fi
     fi
 
-    # run parallel (GPU) 
-    if [[ "$MODE" == "par" || "$MODE" == "both" ]]; then
+    # run parallel (original GPU Strassen)
+    if $need_par; then
         echo "-> 執行 par: ${SRUN} ${NVPROF} ${STRASSEN_PAR_EXE} $N $A_FILE $B_FILE $C_TRUE_FILE" | tee -a $LOG_FILE
-        # 如果 SRUN 為空字串則不使用 srun
         if [ -z "$SRUN" ]; then
             CMD_PAR="${NVPROF:+$NVPROF }${STRASSEN_PAR_EXE} \"$N\" \"$A_FILE\" \"$B_FILE\" \"$C_TRUE_FILE\""
         else
             CMD_PAR="${SRUN} ${NVPROF:+$NVPROF }${STRASSEN_PAR_EXE} \"$N\" \"$A_FILE\" \"$B_FILE\" \"$C_TRUE_FILE\""
         fi
         eval $CMD_PAR 2>&1 | tee -a $LOG_FILE
-        # capture exit code of the executed program (before pipe)
         EXIT_CODE=${PIPESTATUS[0]}
         if [ $EXIT_CODE -ne 0 ]; then
             echo "警告: par 在 N=$N 執行失敗 (退出碼 $EXIT_CODE)" | tee -a $LOG_FILE
         fi
     fi
 
+    # run block-par (blocking GEMM)
+    if $need_block; then
+        echo "-> 執行 block: ${SRUN} ${NVPROF} ${BLOCK_PAR_EXE} $N $A_FILE $B_FILE $C_TRUE_FILE" | tee -a $LOG_FILE
+        if [ -z "$SRUN" ]; then
+            CMD_BLOCK="${NVPROF:+$NVPROF }${BLOCK_PAR_EXE} \"$N\" \"$A_FILE\" \"$B_FILE\" \"$C_TRUE_FILE\""
+        else
+            CMD_BLOCK="${SRUN} ${NVPROF:+$NVPROF }${BLOCK_PAR_EXE} \"$N\" \"$A_FILE\" \"$B_FILE\" \"$C_TRUE_FILE\""
+        fi
+        eval $CMD_BLOCK 2>&1 | tee -a $LOG_FILE
+        EXIT_CODE=${PIPESTATUS[0]}
+        if [ $EXIT_CODE -ne 0 ]; then
+            echo "警告: block 在 N=$N 執行失敗 (退出碼 $EXIT_CODE)" | tee -a $LOG_FILE
+        fi
+    fi
+
 done
 
+make clean
 echo -e "\n--- 測試完成 ---" | tee -a $LOG_FILE
 echo "結果已寫入 $LOG_FILE"
 
