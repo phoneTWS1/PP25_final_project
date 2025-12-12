@@ -4,39 +4,66 @@
 #include <assert.h>
 
 int N;
-float *A, *B;
+float *A, *B, *C_true;
 float *C;
 #define Bs 32
 
-void create_matrix(){
-    A = (float *)malloc(N * N * sizeof(float));
-    B = (float *)malloc(N * N  * sizeof(float));
-    C = (float *)malloc(N * N * sizeof(float));
-    for(int i = 0 ; i < N * N; i++){
-        A[i] = (float)i;
-        B[i] = 0.0f;
-        C[i] = 0.0f;
+void load_matrix(float **mat_ptr, int N_dim, const char *filename) {
+    long long size = (long long)N_dim * N_dim;
+    size_t bytes = size * sizeof(float);
+    
+    FILE *file = fopen(filename, "rb"); 
+    if (file == NULL) {
+        fprintf(stderr, "Error: Cannot open file %s\n", filename);
+        exit(EXIT_FAILURE);
     }
 
-    for(int i=0 ; i<N ; i++){
-        B[i * N + i] = 1.0f;
+    *mat_ptr = (float *)malloc(bytes);
+    if (*mat_ptr == NULL) {
+        perror("Host malloc failed in load_matrix");
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+
+    size_t read_count = fread(*mat_ptr, sizeof(float), size, file);
+    if (read_count != size) {
+        fprintf(stderr, "Error: Read incomplete from %s. Expected %lld elements, read %zu.\n", 
+                filename, size, read_count);
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+
+    fclose(file);
+}
+
+void correctness_check(const float *C_true, const float *C_result, int N){
+    int mismatch_count = 0;
+    float tol = 5e-3f;
+    long long sz = (long long)N * N;
+    float max_error = 0.0f;
+    
+    for(long long i=0; i < sz; i++){
+        float error = fabsf(C_result[i] - C_true[i]);
+        if (error > max_error) max_error = error;
+        
+        if (error > tol){
+             mismatch_count++;
+             if (mismatch_count <= 10) {
+                 fprintf(stderr, "Mismatch at index %lld: Result=%.6f, True=%.6f, Error=%.6f\n", 
+                         i, C_result[i], C_true[i], error);
+             }
+        }
     }
     
+    printf("Maximum error: %.6f\n", max_error);
+    
+    if(mismatch_count > 0){
+        printf("FAILED: Result mismatch with loaded answer C. Total errors: %d\n", mismatch_count);
+    } else {
+        printf("SUCCESS: Result matches loaded answer C.\n");
+    }
 }
 
-void correctness_check(){
-    int cnt = 0;
-    for(int i = 0 ; i < N * N ; i++){
-        if(C[i] != A[i])
-            break;
-        cnt++;
-    }
-    if(cnt != N * N){
-        printf("failed: cnt = %d\n ",cnt);
-    }else{
-        printf("success\n");
-    }
-}
 
 // grid = dim3(n,n), block = dim3(Bs,Bs)
 __global__ void block_mul_kernel(
@@ -78,10 +105,15 @@ int main(int argc, char* argv[]){
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
 
-    assert(argc==2);
+    assert(argc==5);
     N = atoi(argv[1]);
-
-    create_matrix();
+    const char *a_filename = argv[2];
+    const char *b_filename = argv[3];
+    const char *c_true_filename = argv[4];
+    load_matrix(&A, N, a_filename);
+    load_matrix(&B, N, b_filename);
+    load_matrix(&C_true, N, c_true_filename); 
+    C = (float*)malloc(N * N * sizeof(float));
 
     //int Bs = 32; // Block size
     int n = N / Bs;
@@ -119,7 +151,7 @@ int main(int argc, char* argv[]){
     cudaFree(d_B);
     cudaFree(d_C);
 
-    correctness_check();
+    correctness_check(C_true, C, N);
 
     return 0;
 }

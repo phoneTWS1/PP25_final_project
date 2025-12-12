@@ -4,13 +4,13 @@
 #include <assert.h>
 
 int N;
-float *A, *B, *C_true;
-float *C;
+double *A, *B, *C_true;
+double *C;
 #define Bs 32
 
-void load_matrix(float **mat_ptr, int N_dim, const char *filename) {
+void load_matrix(double **mat_ptr, int N_dim, const char *filename) {
     long long size = (long long)N_dim * N_dim;
-    size_t bytes = size * sizeof(float);
+    size_t bytes = size * sizeof(double);
     
     FILE *file = fopen(filename, "rb"); 
     if (file == NULL) {
@@ -18,14 +18,14 @@ void load_matrix(float **mat_ptr, int N_dim, const char *filename) {
         exit(EXIT_FAILURE);
     }
 
-    *mat_ptr = (float *)malloc(bytes);
+    *mat_ptr = (double *)malloc(bytes);
     if (*mat_ptr == NULL) {
         perror("Host malloc failed in load_matrix");
         fclose(file);
         exit(EXIT_FAILURE);
     }
 
-    size_t read_count = fread(*mat_ptr, sizeof(float), size, file);
+    size_t read_count = fread(*mat_ptr, sizeof(double), size, file);
     if (read_count != size) {
         fprintf(stderr, "Error: Read incomplete from %s. Expected %lld elements, read %zu.\n", 
                 filename, size, read_count);
@@ -36,14 +36,14 @@ void load_matrix(float **mat_ptr, int N_dim, const char *filename) {
     fclose(file);
 }
 
-void correctness_check(const float *C_true, const float *C_result, int N){
+void correctness_check(const double *C_true, const double *C_result, int N){
     int mismatch_count = 0;
-    float tol = 5e-3f;
+    double tol = 5e-3f;
     long long sz = (long long)N * N;
-    float max_error = 0.0f;
+    double max_error = 0.0f;
     
     for(long long i=0; i < sz; i++){
-        float error = fabsf(C_result[i] - C_true[i]);
+        double error = fabsf(C_result[i] - C_true[i]);
         if (error > max_error) max_error = error;
         
         if (error > tol){
@@ -69,51 +69,36 @@ void correctness_check(const float *C_true, const float *C_result, int N){
 __global__ void block_mul_kernel(
     int N,
     int n,
-    float *d_A,
-    float *d_B,
-    float *d_C
+    double *d_A,
+    double *d_B,
+    double *d_C
 ){
-    extern __shared__ float share[];
-    float *A_block = share;
-    float *B_block = share + Bs * Bs;
-
     // block index 
     int bx = blockIdx.x;
     int by = blockIdx.y;
-    int A_start_row = bx * Bs;
+    int start_row = bx * Bs;
+    int start_col = by * Bs;
+
+    int A_start_row = start_row;
     int A_start_col;
     int B_start_row;
-    int B_start_col = by * Bs;
+    int B_start_col = start_col;
     
-    // block local index                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
-    int lx = threadIdx.x;
-    int ly = threadIdx.y;
-    int idx = lx * Bs + ly;
+    // block local index
+    int lx = threadIdx.y; // constant
+    int ly = threadIdx.x; // 0....31
+    
+    // global index
+    int idx = (start_row + lx) * N + start_col + ly;
 
-    // intialized
-    float c = 0;
-
-    for(int bk = 0; bk< n ; bk++){
+    for(int bk = 0 ; bk < n ; bk++){
         A_start_col = bk * Bs;
         B_start_row = bk * Bs;
-        
-        // load A, B block
-        A_block[idx] = d_A[(A_start_row + lx) * N + A_start_col + ly];
-        B_block[idx] = d_B[(B_start_row + lx) * N + B_start_col + ly];
 
-        __syncthreads();
-
-        // compute c
-        #pragma unroll 32
-        for(int k = 0; k < Bs; k++){
-            c += A_block[lx * Bs + k] * B_block[ k * Bs + ly];
+        for(int k = 0; k< Bs ; k++){
+            d_C[idx] += d_A[(A_start_row + lx) * N + (A_start_col + k)] * d_B[(B_start_row + k) * N + B_start_col + ly];
         }
-
-        __syncthreads();
-
     }
-    d_C[((bx * Bs) + lx) * N + (by * Bs) + ly ] = c;
-
 }
 
 int main(int argc, char* argv[]){
@@ -128,19 +113,20 @@ int main(int argc, char* argv[]){
     load_matrix(&A, N, a_filename);
     load_matrix(&B, N, b_filename);
     load_matrix(&C_true, N, c_true_filename); 
-    C = (float*)malloc(N * N * sizeof(float));
+    C = (double*)malloc(N * N * sizeof(double));
 
     //int Bs = 32; // Block size
     int n = N / Bs;
     assert(N % Bs ==0);
 
     // cudaMalloc
-    float *d_A, *d_B, *d_C;
-    size_t gmem = N * N *  sizeof(float);
+    double *d_A, *d_B, *d_C;
+    size_t gmem = N * N *  sizeof(double);
     assert(gmem * 3 < prop.totalGlobalMem);
     cudaMalloc((void **)&d_A, gmem);
     cudaMalloc((void **)&d_B, gmem);
     cudaMalloc((void **)&d_C, gmem);
+
     
     // cuda Memory copy
     cudaMemcpy(d_A, A, gmem, cudaMemcpyHostToDevice);
@@ -148,7 +134,7 @@ int main(int argc, char* argv[]){
 
 
     //launch kernel
-    size_t shmem = Bs * Bs * 2 * sizeof(float);
+    size_t shmem = Bs * Bs * 2 * sizeof(double);
     block_mul_kernel<<<dim3(n,n), dim3(Bs,Bs), shmem>>>(
         N,
         n,
@@ -156,10 +142,10 @@ int main(int argc, char* argv[]){
         d_B,
         d_C
     );
-    
-    //cuda Memory copy
-    cudaMemcpy(C, d_C, gmem, cudaMemcpyDeviceToHost);    
 
+    //cuda Memory copy
+    cudaMemcpy(C, d_C, gmem, cudaMemcpyDeviceToHost);
+    
     //free cuda memeory
     cudaFree(d_A);
     cudaFree(d_B);
@@ -167,6 +153,5 @@ int main(int argc, char* argv[]){
 
     correctness_check(C_true, C, N);
 
-    
     return 0;
 }
