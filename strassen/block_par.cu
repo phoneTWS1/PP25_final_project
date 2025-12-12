@@ -1,191 +1,123 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <math.h>
+#include <cuda.h>
+#include <assert.h>
 #include <chrono>
-#include <cuda_runtime.h>
 
-// Advanced optimized two-level + K-chunk tiling matrix multiply (double precision)
-// - Coarse tile size = TILE (user-provided, multiple of BS)
-// - Fine-grained shared-memory tile = BS (threads per block: BS x BS)
-// - K dimension is processed in chunks of TILE to reduce global-memory traffic
-// - Safe boundary handling and no __syncthreads() deadlocks
-// - Optional pinned host memory and async copies
-//
-// Build: nvcc -O3 -arch=sm_70 matmul_tiled_optimized.cu -o matmul_tiled_optimized
+int N;
+float *A, *B, *C_true;
+float *C;
+#define Bs 32
+int TILE = 512;
 
-// ------------------------ Configurable parameters -------------------------
-static int N = 0;
-static int TILE = 512; // coarse tile (must be multiple of BS)
-static const int BS = 32; // block (shared tile) dimension (threads per block = BS x BS)
-static bool USE_PINNED = true; // if true, allocate host pinned memory for H2D/D2H
+void load_matrix(float**, int, const char *filename);
+void correctness_check(const float*, const float*, int);
+void show(float*, int);
 
-// Host pointers (may be pinned)
-static double *h_A = nullptr, *h_B = nullptr, *h_C_result = nullptr, *h_C_true = nullptr;
-
-// --- helper ---------------------------------------------------------------
-static void checkCuda(cudaError_t e, const char *msg) {
-    if (e != cudaSuccess) {
-        fprintf(stderr, "CUDA error %s: %s\n", msg, cudaGetErrorString(e));
-        exit(EXIT_FAILURE);
-    }
+__inline__ __device__ float warpReduceSum(float val) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    return val;
 }
 
-void load_matrix(double **mat_ptr, int N_dim, const char *filename) {
-    long long size = (long long)N_dim * N_dim;
-    size_t bytes_f = (size_t)size * sizeof(float);
-    size_t bytes_d = (size_t)size * sizeof(double);
 
-    FILE *file = fopen(filename, "rb");
-    if (file == NULL) {
-        fprintf(stderr, "Error: Cannot open file %s\n", filename);
-        exit(EXIT_FAILURE);
-    }
 
-    float *tmp = (float *)malloc(bytes_f);
-    if (tmp == NULL) {
-        perror("malloc failed for tmp float buffer");
-        fclose(file);
-        exit(EXIT_FAILURE);
-    }
+// 修改：支援可變 coarse TILE（must be multiple of Bs）
+// blockDim = dim3(Bs, 8) (固定)
+// 每個 block 負責一個 TILE x TILE 的輸出區塊，內部以 Bs x Bs 的 shared-loading 反覆累加
+// 每個 thread 原本負責 4 rows in a Bs-subtile（wrap of 4 rows），在 TILE > Bs 時會處理多個 subtiles
+__global__ void block_mul_kernel(
+    int N,
+    int TILE,            // coarse tile size (multiple of Bs)
+    float *d_A,
+    float *d_B,
+    float *d_C
+){
+    extern __shared__ float share[];
+    float *A_block = share;                         // Bs * Bs
+    float *B_block = share + Bs * Bs;              // Bs * Bs
 
-    size_t read_count = fread(tmp, sizeof(float), size, file);
-    if (read_count != (size_t)size) {
-        fprintf(stderr, "Error: Read incomplete from %s. Expected %lld elements, read %zu.\n",
-                filename, size, read_count);
-        free(tmp);
-        fclose(file);
-        exit(EXIT_FAILURE);
-    }
-    fclose(file);
+    // block index -> tile coordinates
+    int tile_col = blockIdx.x; // x -> columns of tiles
+    int tile_row = blockIdx.y; // y -> rows of tiles
 
-    // allocate host (pinned if requested)
-    if (USE_PINNED) {
-        checkCuda(cudaMallocHost((void **)mat_ptr, bytes_d), "cudaMallocHost mat_ptr");
-    } else {
-        *mat_ptr = (double *)malloc(bytes_d);
-        if (*mat_ptr == NULL) { perror("Host malloc failed"); free(tmp); exit(EXIT_FAILURE); }
-    }
+    int tile_row_base = tile_row * TILE;
+    int tile_col_base = tile_col * TILE;
 
-    for (long long i = 0; i < size; ++i) {
-        (*mat_ptr)[i] = (double)tmp[i];
-    }
-    free(tmp);
+    // local thread indices
+    int lx = threadIdx.y; // 0..7
+    int ly = threadIdx.x; // 0..31
+
+    // threads per warp-group handle 4 rows per Bs-subtile (same as original)
+    int wrap_row_base = lx * 4; // within a Bs-subtile: 0,4,8,...,28
+
+    int R = TILE / Bs; // number of Bs-subtiles per TILE (assume TILE % Bs == 0)
+
+    // For each sub-output sub-tile inside this coarse TILE
+    for (int ii = 0; ii < R; ++ii) {
+        for (int jj = 0; jj < R; ++jj) {
+            // compute the subtile's top-left coords
+            int A_sub_row = tile_row_base + ii * Bs; // row base for A subtile
+            int B_sub_col = tile_col_base + jj * Bs; // col base for B subtile
+
+            // accumulators for 4 rows handled by this thread in the Bs-subtile
+            float c0 = 0.0f, c1 = 0.0f, c2 = 0.0f, c3 = 0.0f;
+
+            // iterate over k-blocks (Bs-sized) across the full matrix
+            int num_kblocks = N / Bs;
+            for (int bk = 0; bk < num_kblocks; ++bk) {
+                int A_sub_col = bk * Bs;
+                int B_sub_row = bk * Bs;
+
+                // load A_block (each thread writes 4 elements in column 'ly')
+                // bounds check safe because we require N % Bs == 0
+                A_block[(wrap_row_base + 0) * Bs + ly] = d_A[(A_sub_row + wrap_row_base + 0) * N + A_sub_col + ly];
+                A_block[(wrap_row_base + 1) * Bs + ly] = d_A[(A_sub_row + wrap_row_base + 1) * N + A_sub_col + ly];
+                A_block[(wrap_row_base + 2) * Bs + ly] = d_A[(A_sub_row + wrap_row_base + 2) * N + A_sub_col + ly];
+                A_block[(wrap_row_base + 3) * Bs + ly] = d_A[(A_sub_row + wrap_row_base + 3) * N + A_sub_col + ly];
+
+                // load B_block (Bs x Bs) for this (bk, jj) position
+                B_block[(wrap_row_base + 0) * Bs + ly] = d_B[(B_sub_row + wrap_row_base + 0) * N + B_sub_col + ly];
+                B_block[(wrap_row_base + 1) * Bs + ly] = d_B[(B_sub_row + wrap_row_base + 1) * N + B_sub_col + ly];
+                B_block[(wrap_row_base + 2) * Bs + ly] = d_B[(B_sub_row + wrap_row_base + 2) * N + B_sub_col + ly];
+                B_block[(wrap_row_base + 3) * Bs + ly] = d_B[(B_sub_row + wrap_row_base + 3) * N + B_sub_col + ly];
+
+                __syncthreads();
+
+                // compute inner product for the 4 rows handled by this thread
+                #pragma unroll 32
+                for (int k = 0; k < Bs; ++k) {
+                    float b = B_block[k * Bs + ly];
+                    float a0 = A_block[(wrap_row_base + 0) * Bs + k];
+                    float a1 = A_block[(wrap_row_base + 1) * Bs + k];
+                    float a2 = A_block[(wrap_row_base + 2) * Bs + k];
+                    float a3 = A_block[(wrap_row_base + 3) * Bs + k];
+
+                    c0 += a0 * b;
+                    c1 += a1 * b;
+                    c2 += a2 * b;
+                    c3 += a3 * b;
+                }
+
+                __syncthreads();
+            } // bk
+
+            // write back results for this subtile (4 rows)
+            d_C[(A_sub_row + wrap_row_base + 0) * N + B_sub_col + ly] += c0;
+            d_C[(A_sub_row + wrap_row_base + 1) * N + B_sub_col + ly] += c1;
+            d_C[(A_sub_row + wrap_row_base + 2) * N + B_sub_col + ly] += c2;
+            d_C[(A_sub_row + wrap_row_base + 3) * N + B_sub_col + ly] += c3;
+        } // jj
+    } // ii
 }
 
-void correctness_check(const double *C_true_loc, const double *C_result_loc, int N_loc){
-    long long sz = (long long)N_loc * N_loc;
-    double max_error = 0.0;
-    long long mismatches = 0;
-    double tol = 5e-3 * double(N_loc) * double(N_loc);
+int main(int argc, char* argv[]){
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
 
-    for (long long i = 0; i < sz; ++i) {
-        double err = fabs(C_result_loc[i] - C_true_loc[i]);
-        if (err > max_error) max_error = err;
-        if (err > tol) {
-            mismatches++;
-            if (mismatches <= 10) {
-                fprintf(stderr, "Mismatch idx %lld: res=%.8f true=%.8f err=%.8f\n", i, C_result_loc[i], C_true_loc[i], err);
-            }
-        }
-    }
-    printf("max error = %.8e, mismatches = %lld\n", max_error, mismatches);
-    if (mismatches == 0) printf("SUCCESS\n");
-    else printf("FAILED\n");
-}
-
-void cleanup_memory() {
-    if (h_A) {
-        if (USE_PINNED) cudaFreeHost(h_A); else free(h_A);
-        h_A = nullptr;
-    }
-    if (h_B) {
-        if (USE_PINNED) cudaFreeHost(h_B); else free(h_B);
-        h_B = nullptr;
-    }
-    if (h_C_true) {
-        if (USE_PINNED) cudaFreeHost(h_C_true); else free(h_C_true);
-        h_C_true = nullptr;
-    }
-    if (h_C_result) {
-        if (USE_PINNED) cudaFreeHost(h_C_result); else free(h_C_result);
-        h_C_result = nullptr;
-    }
-}
-
-// ------------------------ Kernel ------------------------------------------
-// Each block handles a TILE x TILE output tile. Threads are BS x BS.
-// Inside a block, we iterate over the TILE in BS-sized shared-memory steps.
-// K dimension is processed in chunks of TILE; for each k-chunk we do inner BS loops.
-
-__global__ void matmul_tiled_optimized(const double *A, const double *B, double *C, int N, int TILE) {
-    __shared__ double As[BS][BS];
-    __shared__ double Bs[BS][BS];
-
-    int bx = blockIdx.x; // output tile column
-    int by = blockIdx.y; // output tile row
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
-
-    // coarse tile base coordinates
-    int C_tile_row_base = by * TILE;
-    int C_tile_col_base = bx * TILE;
-
-    // number of sub-blocks inside a TILE
-    int R = TILE / BS;
-
-    // k-chunk loop: process K in chunks of size TILE to reuse A/B data on device
-    for (int k_tile = 0; k_tile < N; k_tile += TILE) {
-        int this_k_tile_size = min(TILE, N - k_tile);
-        int num_k_subtiles = (this_k_tile_size + BS - 1) / BS; // how many BS steps in this k-chunk
-
-        // For each sub-output (ii,jj) inside the TILE block, accumulate partial results
-        for (int ii = 0; ii < R; ++ii) {
-            for (int jj = 0; jj < R; ++jj) {
-
-                int C_row = C_tile_row_base + ii * BS + ty;
-                int C_col = C_tile_col_base + jj * BS + tx;
-                double C_value = 0.0;
-
-                // iterate over k-subtiles inside this k-chunk
-                for (int t = 0; t < num_k_subtiles; ++t) {
-                    // Global indices for loads
-                    int A_col = k_tile + t * BS + tx; // column index in A
-                    int B_row = k_tile + t * BS + ty; // row index in B
-
-                    // Load As: row = C_row, col = A_col
-                    As[ty][tx] = A[(long long)C_row * N + A_col];
-                    As[ty][tx] = 0.0;
-                    
-
-                    // Load Bs: row = B_row, col = C_col
-                    Bs[ty][tx] = B[(long long)B_row * N + C_col];
-                    Bs[ty][tx] = 0.0;
-                    
-
-                    __syncthreads();
-
-                    #pragma unroll
-                    for (int k = 0; k < BS; ++k) {
-                        C_value += As[ty][k] * Bs[k][tx];
-                    }
-
-                    __syncthreads();
-                } // t
-
-                C[(long long)C_row * N + C_col] += C_value;
-                
-            } // jj
-        } // ii
-    } // k_tile
-}
-
-// ------------------------ main --------------------------------------------
-int main(int argc, char **argv) {
-    if (argc < 5 || argc > 7) {
-        fprintf(stderr, "usage: %s N A_filename B_filename C_true_filename [TILE] [use_pinned 0/1]\n", argv[0]);
-        fprintf(stderr, "  TILE (optional) must be multiple of %d. Default %d.\n", BS, TILE);
-        fprintf(stderr, "  use_pinned (optional) 0 or 1; default 1 (pinned host memory).\n");
+    if (!(argc == 5 || argc == 6)) {
+        fprintf(stderr, "usage: %s N A_file B_file C_true_file [TILE]\n", argv[0]);
         return 1;
     }
 
@@ -193,80 +125,126 @@ int main(int argc, char **argv) {
     const char *a_filename = argv[2];
     const char *b_filename = argv[3];
     const char *c_true_filename = argv[4];
-    if (argc >= 6) TILE = atoi(argv[5]);
-    if (argc == 7) USE_PINNED = (atoi(argv[6]) != 0);
+    if (argc == 6) TILE = atoi(argv[5]);
 
-    if (N <= 0) { fprintf(stderr, "N must be positive\n"); return 1; }
-    if (TILE < BS || (TILE % BS) != 0) { fprintf(stderr, "TILE (%d) must be multiple of BS (%d) and >= BS.\n", TILE, BS); return 1; }
+    if (N % Bs != 0) { fprintf(stderr, "Error: N must be divisible by %d\n", Bs); return 1; }
+    if (TILE % Bs != 0) { fprintf(stderr, "Error: TILE must be multiple of %d\n", Bs); return 1; }
+    if (N % TILE != 0) { fprintf(stderr, "Error: N must be divisible by TILE\n"); return 1; }
 
-    // Small safety: check shared memory per block (As + Bs) = 2 * BS*BS*sizeof(double)
-    int shared_bytes = 2 * BS * BS * (int)sizeof(double);
-    int device; checkCuda(cudaGetDevice(&device), "get device");
-    cudaDeviceProp prop; checkCuda(cudaGetDeviceProperties(&prop, device), "get device properties");
-    if (shared_bytes > prop.sharedMemPerBlock) {
-        fprintf(stderr, "Error: required shared memory %d > device limit %d. Reduce BS.\n", shared_bytes, prop.sharedMemPerBlock);
-        return 1;
-    }
+    load_matrix(&A, N, a_filename);
+    load_matrix(&B, N, b_filename);
+    load_matrix(&C_true, N, c_true_filename);
+    C = (float*)calloc((size_t)N * N, sizeof(float));
+    assert(C);
 
-    printf("Loading data N=%d TILE=%d (BS=%d) pinned=%d...\n", N, TILE, BS, USE_PINNED);
-    // load as double (file contains float values)
-    load_matrix(&h_A, N, a_filename);
-    load_matrix(&h_B, N, b_filename);
-    load_matrix(&h_C_true, N, c_true_filename);
+    int tiles = N / TILE;
 
-    size_t elems = (size_t)N * (size_t)N;
-    size_t bytes = elems * sizeof(double);
+    // cudaMalloc
+    float *d_A, *d_B, *d_C;
+    size_t gmem = (size_t)N * N *  sizeof(float);
+    assert(gmem * 3 < prop.totalGlobalMem);
+    cudaMalloc((void **)&d_A, gmem);
+    cudaMalloc((void **)&d_B, gmem);
+    cudaMalloc((void **)&d_C, gmem);
+    
+    // cuda Memory copy
+    cudaMemcpy(d_A, A, gmem, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, B, gmem, cudaMemcpyHostToDevice);
+    cudaMemset(d_C, 0, gmem);
 
-    // allocate host result (pinned if requested)
-    if (USE_PINNED) checkCuda(cudaMallocHost((void **)&h_C_result, bytes), "cudaMallocHost C_result");
-    else {
-        h_C_result = (double *)calloc(elems, sizeof(double));
-        if (!h_C_result) { perror("calloc C_result"); cleanup_memory(); return 1; }
-    }
-    memset(h_C_result, 0, bytes);
-
-    // device buffers
-    double *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
-    checkCuda(cudaMalloc((void**)&d_A, bytes), "malloc d_A");
-    checkCuda(cudaMalloc((void**)&d_B, bytes), "malloc d_B");
-    checkCuda(cudaMalloc((void**)&d_C, bytes), "malloc d_C");
-
-    // streams (one stream is fine here; left for extensibility)
-    cudaStream_t stream; checkCuda(cudaStreamCreate(&stream), "create stream");
-
-    // async copies (host must be pinned for true async overlap)
-    checkCuda(cudaMemcpyAsync(d_A, h_A, bytes, cudaMemcpyHostToDevice, stream), "memcpy H2D A");
-    checkCuda(cudaMemcpyAsync(d_B, h_B, bytes, cudaMemcpyHostToDevice, stream), "memcpy H2D B");
-    checkCuda(cudaMemsetAsync(d_C, 0, bytes, stream), "memset d_C");
-    checkCuda(cudaStreamSynchronize(stream), "stream sync after H2D copies");
-
-    // Grid and block
-    dim3 block(BS, BS);
-    dim3 grid((N + TILE - 1) / TILE, (N + TILE - 1) / TILE);
-    printf("Launching kernel grid %dx%d blocks of %dx%d threads\n", grid.x, grid.y, block.x, block.y);
-
+    //launch kernel
     auto chrono_start = std::chrono::steady_clock::now();
-
-    // launch kernel
-    matmul_tiled_optimized<<<grid, block, 0, stream>>>(d_A, d_B, d_C, N, TILE);
-    checkCuda(cudaGetLastError(), "kernel launch");
-    checkCuda(cudaStreamSynchronize(stream), "stream sync after kernel");
+    size_t shmem = Bs * Bs * 2 * sizeof(float); // shared mem holds two Bs x Bs tiles
+    dim3 grid(tiles, tiles);
+    dim3 block(Bs, 8);
+    block_mul_kernel<<<grid, block, shmem>>>(
+        N,
+        TILE,
+        d_A,
+        d_B,
+        d_C
+    );
 
     auto chrono_end = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed = chrono_end - chrono_start;
     printf("Total computing time: %.6f s\n", elapsed.count());
 
-    // copy back result
-    checkCuda(cudaMemcpyAsync(h_C_result, d_C, bytes, cudaMemcpyDeviceToHost, stream), "memcpy D2H C");
-    checkCuda(cudaStreamSynchronize(stream), "stream sync after D2H");
+    //cuda Memory copy
+    cudaMemcpy(C, d_C, gmem, cudaMemcpyDeviceToHost); 
 
-    // correctness check
-    correctness_check(h_C_true, h_C_result, N);
+    //free cuda memeory
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
 
-    // cleanup
-    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
-    cudaStreamDestroy(stream);
-    cleanup_memory();
+    correctness_check(C_true, C, N);
 
+    free(C);
     return 0;
+}
+
+void load_matrix(float **mat_ptr, int N_dim, const char *filename) {
+    long long size = (long long)N_dim * N_dim;
+    size_t bytes = size * sizeof(float);
+    
+    FILE *file = fopen(filename, "rb"); 
+    if (file == NULL) {
+        fprintf(stderr, "Error: Cannot open file %s\n", filename);
+        exit(EXIT_FAILURE);
+    }
+
+    *mat_ptr = (float *)malloc(bytes);
+    if (*mat_ptr == NULL) {
+        perror("Host malloc failed in load_matrix");
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+
+    size_t read_count = fread(*mat_ptr, sizeof(float), size, file);
+    if (read_count != size) {
+        fprintf(stderr, "Error: Read incomplete from %s. Expected %lld elements, read %zu.\n", 
+                filename, size, read_count);
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+
+    fclose(file);
+}
+
+void correctness_check(const float *C_true, const float *C_result, int N){
+    int mismatch_count = 0;
+    float tol = 5e-3f * double(N) * double(N);
+    long long sz = (long long)N * N;
+    float max_error = 0.0f;
+    
+    for(long long i=0; i < sz; i++){
+        float error = fabsf(C_result[i] - C_true[i]);
+        if (error > max_error) max_error = error;
+        
+        if (error > tol){
+             mismatch_count++;
+             if (mismatch_count <= 10) {
+                 fprintf(stderr, "Mismatch at index %lld: Result=%.6f, True=%.6f, Error=%.6f\n", 
+                         i, C_result[i], C_true[i], error);
+             }
+        }
+    }
+    
+    printf("Maximum error: %.6f\n", max_error);
+    
+    if(mismatch_count > 0){
+        printf("FAILED: Result mismatch with loaded answer C. Total errors: %d\n", mismatch_count);
+    } else {
+        printf("SUCCESS: Result matches loaded answer C.\n");
+    }
+}
+
+void show(float* M, int N){
+    for(int i = 0; i < N; i++){
+        for(int j = 0; j < N ;j++){
+            printf("%.0f, ", M[i * N+ j]);
+        }
+        printf("\n");
+    }
+    printf("\n");
 }

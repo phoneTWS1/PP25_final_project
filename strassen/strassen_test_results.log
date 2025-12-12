@@ -1,83 +1,72 @@
 --- 矩陣乘法測試腳本 ---
-測試時間: Sat Dec 13 12:42:05 AM CST 2025
-執行模式: block
+測試時間: Sat Dec 13 03:41:43 AM CST 2025
+執行模式: par
 測試維度: 64 128 256 512 1024 2048 4096 8192 16384
 ---
 -> 編譯程式...
 
 --- 測試 N=64 ---
--> 執行 block: srun -p nvidia -n1 --gres=gpu:1  ./block_par 64 ../dataset/A_64 ../dataset/B_64 ../dataset/C_64
-Mismatch idx 96: res=0.00000000 true=20.51309967 err=20.51309967
-Mismatch idx 526: res=0.00000000 true=20.87629318 err=20.87629318
-Mismatch idx 608: res=0.00000000 true=20.68885803 err=20.68885803
-Mismatch idx 779: res=0.00000000 true=21.39168167 err=21.39168167
-Mismatch idx 782: res=0.00000000 true=21.51846504 err=21.51846504
-Mismatch idx 800: res=0.00000000 true=22.01399231 err=22.01399231
-Mismatch idx 804: res=0.00000000 true=20.50465393 err=20.50465393
-Mismatch idx 806: res=0.00000000 true=20.51620102 err=20.51620102
-Mismatch idx 810: res=0.00000000 true=20.53752708 err=20.53752708
-Mismatch idx 822: res=0.00000000 true=21.04249763 err=21.04249763
-Loading data N=64 TILE=512 (BS=32) pinned=1...
-Launching kernel grid 1x1 blocks of 32x32 threads
-Total computing time: 0.110374 s
-max error = 2.26054935e+01, mismatches = 54
-FAILED
+-> 執行 par: srun -p nvidia -n1 --gres=gpu:1  ./strassen_par 64 ../dataset/A_64 ../dataset/B_64 ../dataset/C_64
+Error: N=64 must be positive and divisible by TILE=512. TILE must be even.
+srun: error: apollo-nv-vm1: task 0: Exited with exit code 1
+警告: par 在 N=64 執行失敗 (退出碼 1)
 
 --- 測試 N=128 ---
--> 執行 block: srun -p nvidia -n1 --gres=gpu:1  ./block_par 128 ../dataset/A_128 ../dataset/B_128 ../dataset/C_128
-Loading data N=128 TILE=512 (BS=32) pinned=1...
-Launching kernel grid 1x1 blocks of 32x32 threads
-Total computing time: 0.007772 s
-max error = 4.28177490e+01, mismatches = 0
-SUCCESS
+-> 執行 par: srun -p nvidia -n1 --gres=gpu:1  ./strassen_par 128 ../dataset/A_128 ../dataset/B_128 ../dataset/C_128
+Error: N=128 must be positive and divisible by TILE=512. TILE must be even.
+srun: error: apollo-nv-vm2: task 0: Exited with exit code 1
+警告: par 在 N=128 執行失敗 (退出碼 1)
 
 --- 測試 N=256 ---
--> 執行 block: srun -p nvidia -n1 --gres=gpu:1  ./block_par 256 ../dataset/A_256 ../dataset/B_256 ../dataset/C_256
-CUDA error stream sync after kernel: an illegal memory access was encountered
-Loading data N=256 TILE=512 (BS=32) pinned=1...
-Launching kernel grid 1x1 blocks of 32x32 threads
+-> 執行 par: srun -p nvidia -n1 --gres=gpu:1  ./strassen_par 256 ../dataset/A_256 ../dataset/B_256 ../dataset/C_256
 srun: error: apollo-nv-vm1: task 0: Exited with exit code 1
-警告: block 在 N=256 執行失敗 (退出碼 1)
+Error: N=256 must be positive and divisible by TILE=512. TILE must be even.
+警告: par 在 N=256 執行失敗 (退出碼 1)
 
 --- 測試 N=512 ---
--> 執行 block: srun -p nvidia -n1 --gres=gpu:1  ./block_par 512 ../dataset/A_512 ../dataset/B_512 ../dataset/C_512
-Loading data N=512 TILE=512 (BS=32) pinned=1...
-Launching kernel grid 1x1 blocks of 32x32 threads
-Total computing time: 0.027581 s
-max error = 1.50519379e+02, mismatches = 0
-SUCCESS
+-> 執行 par: srun -p nvidia -n1 --gres=gpu:1  ./strassen_par 512 ../dataset/A_512 ../dataset/B_512 ../dataset/C_512
+Loading data for N=512 with TILE=512 (Multi-stream Fused Strassen)...
+Computing tiled Strassen with Fused Kernel and 8 streams...
+Total computing time: 0.054084 s
+Computation complete. Checking correctness...
+Maximum error: 0.000183
+SUCCESS: Result matches loaded answer C.
 
 --- 測試 N=1024 ---
--> 執行 block: srun -p nvidia -n1 --gres=gpu:1  ./block_par 1024 ../dataset/A_1024 ../dataset/B_1024 ../dataset/C_1024
-Loading data N=1024 TILE=512 (BS=32) pinned=1...
-Launching kernel grid 2x2 blocks of 32x32 threads
-Total computing time: 0.062134 s
-max error = 2.91949554e+02, mismatches = 0
-SUCCESS
+-> 執行 par: srun -p nvidia -n1 --gres=gpu:1  ./strassen_par 1024 ../dataset/A_1024 ../dataset/B_1024 ../dataset/C_1024
+Loading data for N=1024 with TILE=512 (Multi-stream Fused Strassen)...
+Computing tiled Strassen with Fused Kernel and 8 streams...
+Total computing time: 0.017348 s
+Computation complete. Checking correctness...
+Maximum error: 0.000644
+SUCCESS: Result matches loaded answer C.
 
 --- 測試 N=2048 ---
--> 執行 block: srun -p nvidia -n1 --gres=gpu:1  ./block_par 2048 ../dataset/A_2048 ../dataset/B_2048 ../dataset/C_2048
-Loading data N=2048 TILE=512 (BS=32) pinned=1...
-Launching kernel grid 4x4 blocks of 32x32 threads
-Total computing time: 0.104918 s
-max error = 5.66588623e+02, mismatches = 0
-SUCCESS
+-> 執行 par: srun -p nvidia -n1 --gres=gpu:1  ./strassen_par 2048 ../dataset/A_2048 ../dataset/B_2048 ../dataset/C_2048
+Loading data for N=2048 with TILE=512 (Multi-stream Fused Strassen)...
+Computing tiled Strassen with Fused Kernel and 8 streams...
+Total computing time: 0.106609 s
+Computation complete. Checking correctness...
+Maximum error: 0.001617
+SUCCESS: Result matches loaded answer C.
 
 --- 測試 N=4096 ---
--> 執行 block: srun -p nvidia -n1 --gres=gpu:1  ./block_par 4096 ../dataset/A_4096 ../dataset/B_4096 ../dataset/C_4096
-Loading data N=4096 TILE=512 (BS=32) pinned=1...
-Launching kernel grid 8x8 blocks of 32x32 threads
-Total computing time: 0.827651 s
-max error = 1.09572632e+03, mismatches = 0
-SUCCESS
+-> 執行 par: srun -p nvidia -n1 --gres=gpu:1  ./strassen_par 4096 ../dataset/A_4096 ../dataset/B_4096 ../dataset/C_4096
+Loading data for N=4096 with TILE=512 (Multi-stream Fused Strassen)...
+Computing tiled Strassen with Fused Kernel and 8 streams...
+Total computing time: 0.694453 s
+Computation complete. Checking correctness...
+Maximum error: 0.004845
+SUCCESS: Result matches loaded answer C.
 
 --- 測試 N=8192 ---
--> 執行 block: srun -p nvidia -n1 --gres=gpu:1  ./block_par 8192 ../dataset/A_8192 ../dataset/B_8192 ../dataset/C_8192
-Loading data N=8192 TILE=512 (BS=32) pinned=1...
-Launching kernel grid 16x16 blocks of 32x32 threads
-Total computing time: 5.321588 s
-max error = 2.16618701e+03, mismatches = 0
-SUCCESS
+-> 執行 par: srun -p nvidia -n1 --gres=gpu:1  ./strassen_par 8192 ../dataset/A_8192 ../dataset/B_8192 ../dataset/C_8192
+Loading data for N=8192 with TILE=512 (Multi-stream Fused Strassen)...
+Computing tiled Strassen with Fused Kernel and 8 streams...
+Total computing time: 5.500812 s
+Computation complete. Checking correctness...
+Maximum error: 150.888853
+SUCCESS: Result matches loaded answer C.
 
 --- 測試 N=16384 ---
 警告: 缺少資料檔 (A_16384, B_16384, C_16384)，跳過 N=16384

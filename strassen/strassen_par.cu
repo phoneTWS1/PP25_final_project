@@ -10,6 +10,7 @@ static int N;
 static double *A, *B, *C_result, *C_true;
 
 #define TILE 512  // 每個 tile 大小（必須為偶數）
+#define NUM_STREAMS 8  // 使用的 stream 數量
 
 void load_matrix(double **mat_ptr, int N_dim, const char *filename) {
     long long size = (long long)N_dim * N_dim;
@@ -142,7 +143,7 @@ __global__ void matmul_kernel(const double *a, const double *b, double *c, int n
     }
 }
 
-// CUDA Kernel: 累加 tile 到全域矩陣
+// CUDA Kernel: 累加 tile 到全域矩陣（使用 atomic add 避免 race condition）
 __global__ void accumulate_kernel(double *C_global, const double *C_tile,
                                   int C_row_offset, int C_col_offset, 
                                   int tile_size, int N) {
@@ -162,13 +163,11 @@ __global__ void accumulate_kernel(double *C_global, const double *C_tile,
 }
 
 // 使用 Strassen 算法計算 tile 乘法：C_tile = A_tile * B_tile
-// 所有操作都在 device 上完成
 void strassen_tile_multiply(double *d_A_tile, double *d_B_tile, double *d_C_tile, 
                            int tile_size, 
                            double *d_work[], // 工作區陣列
                            cudaStream_t stream) {
     int n2 = tile_size / 2;  // quadrant 大小
-    // size_t quad_bytes = (size_t)n2 * n2 * sizeof(double);
     
     // 分配工作區索引（總共需要約 20 個 buffer）
     double *d_A00 = d_work[0], *d_A01 = d_work[1], *d_A10 = d_work[2], *d_A11 = d_work[3];
@@ -184,7 +183,6 @@ void strassen_tile_multiply(double *d_A_tile, double *d_B_tile, double *d_C_tile
     dim3 mul_grid((n2 + 31) / 32, (n2 + 31) / 32);
     
     // 步驟 1: 分割 A 和 B 成 4 個 quadrants
-    // 使用 cudaMemcpy2D 從 tile 中提取 quadrants
     cudaMemcpy2DAsync(d_A00, n2 * sizeof(double), 
                       d_A_tile, tile_size * sizeof(double),
                       n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
@@ -256,9 +254,9 @@ void strassen_tile_multiply(double *d_A_tile, double *d_B_tile, double *d_C_tile
     add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M2, d_M4, d_tmp[4], n2, 1.0, 1.0);
     
     // C11 = M1 - M2 + M3 + M6
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M1, d_M2, d_A00, n2, 1.0, -1.0); // 重用 d_A00
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A00, d_M3, d_A01, n2, 1.0, 1.0); // 重用 d_A01
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A01, d_M6, d_A10, n2, 1.0, 1.0); // 重用 d_A10
+    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M1, d_M2, d_A00, n2, 1.0, -1.0);
+    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A00, d_M3, d_A01, n2, 1.0, 1.0);
+    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A01, d_M6, d_A10, n2, 1.0, 1.0);
     
     // 步驟 4: 將四個 quadrants 合併回 C_tile
     cudaMemcpy2DAsync(d_C_tile, tile_size * sizeof(double),
@@ -292,7 +290,7 @@ int main(int argc, char **argv){
         return 1;
     }
 
-    printf("Loading data for N=%d with TILE=%d (Strassen inside tiles)...\n", N, TILE);
+    printf("Loading data for N=%d with TILE=%d (Multi-stream Strassen)...\n", N, TILE);
     load_matrix(&A, N, a_filename);
     load_matrix(&B, N, b_filename);
     load_matrix(&C_true, N, c_true_filename);
@@ -309,20 +307,24 @@ int main(int argc, char **argv){
     int n2 = TILE / 2;
     size_t quad_bytes = (size_t)n2 * n2 * sizeof(double);
 
-    // 分配 device 記憶體
+    // 分配 device 記憶體（全域矩陣）
     double *d_A, *d_B, *d_C_global;
-    double *d_A_tile, *d_B_tile, *d_C_tile;
-    double *d_work[20]; // Strassen 工作區
-
     cudaMalloc(&d_A, (size_t)N * N * sizeof(double));
     cudaMalloc(&d_B, (size_t)N * N * sizeof(double));
     cudaMalloc(&d_C_global, (size_t)N * N * sizeof(double));
-    cudaMalloc(&d_A_tile, tile_bytes);
-    cudaMalloc(&d_B_tile, tile_bytes);
-    cudaMalloc(&d_C_tile, tile_bytes);
+
+    // 為每個 stream 分配 tile buffers 和 work buffers
+    double *d_A_tiles[NUM_STREAMS], *d_B_tiles[NUM_STREAMS], *d_C_tiles[NUM_STREAMS];
+    double *d_work_buffers[NUM_STREAMS][20];
     
-    for(int i = 0; i < 20; i++){
-        cudaMalloc(&d_work[i], quad_bytes);
+    for(int s = 0; s < NUM_STREAMS; s++){
+        cudaMalloc(&d_A_tiles[s], tile_bytes);
+        cudaMalloc(&d_B_tiles[s], tile_bytes);
+        cudaMalloc(&d_C_tiles[s], tile_bytes);
+        
+        for(int i = 0; i < 20; i++){
+            cudaMalloc(&d_work_buffers[s][i], quad_bytes);
+        }
     }
 
     // 拷貝輸入到 device
@@ -334,19 +336,24 @@ int main(int argc, char **argv){
     int acc_threads = 1024;
     int acc_blocks = (TILE * TILE + acc_threads - 1) / acc_threads;
 
-    // 創建 CUDA stream 用於重疊計算
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
+    // 創建多個 CUDA streams
+    cudaStream_t streams[NUM_STREAMS];
+    for(int s = 0; s < NUM_STREAMS; s++){
+        cudaStreamCreate(&streams[s]);
+    }
 
-    printf("Computing tiled Strassen matrix multiplication...\n");
+    printf("Computing tiled Strassen with %d streams...\n", NUM_STREAMS);
 
-    // timing start (use std::chrono)
     auto chrono_start = std::chrono::steady_clock::now();
     
-    // 主迴圈：分塊矩陣乘法
-    // C[ti][tj] = Σ(k) A[ti][tk] * B[tk][tj]
+    // 主迴圈：使用多 streams 平行化
+    int stream_idx = 0;
     for(int ti = 0; ti < tiles; ++ti){
         for(int tj = 0; tj < tiles; ++tj){
+            // 選擇當前 stream
+            int s = stream_idx % NUM_STREAMS;
+            cudaStream_t stream = streams[s];
+            
             for(int tk = 0; tk < tiles; ++tk){
                 // 從全域矩陣提取 tile
                 int A_row_offset = ti * TILE;
@@ -354,58 +361,64 @@ int main(int argc, char **argv){
                 int B_row_offset = tk * TILE;
                 int B_col_offset = tj * TILE;
                 
-                cudaMemcpy2DAsync(d_A_tile, TILE * sizeof(double),
+                cudaMemcpy2DAsync(d_A_tiles[s], TILE * sizeof(double),
                            d_A + A_row_offset * N + A_col_offset, N * sizeof(double),
                            TILE * sizeof(double), TILE,
                            cudaMemcpyDeviceToDevice, stream);
                 
-                cudaMemcpy2DAsync(d_B_tile, TILE * sizeof(double),
+                cudaMemcpy2DAsync(d_B_tiles[s], TILE * sizeof(double),
                            d_B + B_row_offset * N + B_col_offset, N * sizeof(double),
                            TILE * sizeof(double), TILE,
                            cudaMemcpyDeviceToDevice, stream);
                 
                 // 使用 Strassen 計算 C_tile = A_tile * B_tile
-                strassen_tile_multiply(d_A_tile, d_B_tile, d_C_tile, TILE, d_work, stream);
+                strassen_tile_multiply(d_A_tiles[s], d_B_tiles[s], d_C_tiles[s], 
+                                     TILE, d_work_buffers[s], stream);
                 
-                // 累加到全域 C 矩陣
+                // 累加到全域 C 矩陣（使用 atomic add）
                 int C_row_offset = ti * TILE;
                 int C_col_offset = tj * TILE;
                 accumulate_kernel<<<acc_blocks, acc_threads, 0, stream>>>(
-                    d_C_global, d_C_tile, C_row_offset, C_col_offset, TILE, N);
+                    d_C_global, d_C_tiles[s], C_row_offset, C_col_offset, TILE, N);
             }
-        }
-        
-        if((ti + 1) % (tiles / 10 > 0 ? tiles / 10 : 1) == 0){
-            printf("Progress: %d/%d tile rows completed\n", ti + 1, tiles);
+            
+            stream_idx++;
         }
     }
 
-    cudaStreamSynchronize(stream);
+    // 同步所有 streams
+    for(int s = 0; s < NUM_STREAMS; s++){
+        cudaStreamSynchronize(streams[s]);
+    }
+    
     cudaError_t err = cudaGetLastError();
     if(err != cudaSuccess){
         fprintf(stderr, "CUDA Error: %s\n", cudaGetErrorString(err));
     }
 
-    cudaMemcpy(C_result, d_C_global, (size_t)N * N * sizeof(double), cudaMemcpyDeviceToHost);
-
-    // timing end
     auto chrono_end = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed = chrono_end - chrono_start;
     printf("Total computing time: %.6f s\n", elapsed.count());
 
+    cudaMemcpy(C_result, d_C_global, (size_t)N * N * sizeof(double), cudaMemcpyDeviceToHost);
+
     printf("Computation complete. Checking correctness...\n");
     correctness_check(C_true, C_result, N);
 
-    cudaStreamDestroy(stream);
+    // 清理資源
+    for(int s = 0; s < NUM_STREAMS; s++){
+        cudaStreamDestroy(streams[s]);
+        cudaFree(d_A_tiles[s]);
+        cudaFree(d_B_tiles[s]);
+        cudaFree(d_C_tiles[s]);
+        for(int i = 0; i < 20; i++){
+            cudaFree(d_work_buffers[s][i]);
+        }
+    }
+    
     cudaFree(d_A);
     cudaFree(d_B);
     cudaFree(d_C_global);
-    cudaFree(d_A_tile);
-    cudaFree(d_B_tile);
-    cudaFree(d_C_tile);
-    for(int i = 0; i < 20; i++){
-        cudaFree(d_work[i]);
-    }
     
     cleanup_memory();
     return 0;
