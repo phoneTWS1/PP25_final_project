@@ -165,15 +165,17 @@ int main(int argc, char **argv) {
     dim3 grid((N + TILE - 1) / TILE, (N + TILE - 1) / TILE);
 
     // timing with chrono (includes kernel execution and sync)
-    auto t0 = std::chrono::steady_clock::now();
+    auto chrono_start = std::chrono::steady_clock::now();
 
     matmul_block_kernel<<<grid, block>>>(d_A, d_B, d_C, N, TILE);
     checkCuda(cudaGetLastError(), "kernel launch");
     checkCuda(cudaDeviceSynchronize(), "device synchronize");
 
-    auto t1 = std::chrono::steady_clock::now();
-    std::chrono::duration<double> elapsed = t1 - t0;
-    printf("Compute time: %.6f s\n", elapsed.count());
+    auto chrono_end = std::chrono::steady_clock::now();
+    std::chrono::duration<double> elapsed = chrono_end - chrono_start;
+    printf("Total computing time: %.6f s\n", elapsed.count());
+
+    printf("Computation complete. Checking correctness...\n");
 
     checkCuda(cudaMemcpy(C_result, d_C, bytes, cudaMemcpyDeviceToHost), "memcpy D2H C");
 
