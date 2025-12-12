@@ -87,18 +87,24 @@ void cleanup_memory() {
     if (C_result) free(C_result);
 }
 
-// CUDA Kernel: 矩陣加法/減法
-__global__ void add_matrix_kernel(const double *a, const double *b, double *c, int n, double alpha, double beta){
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long total = (long long)n * n;
-
-    if(idx < total){
-        c[idx] = alpha * a[idx] + beta * b[idx];
+// // CUDA Kernel: 矩陣加法/減法（支援 stride）
+__global__ void add_matrix_stride_kernel(const double *a, int stride_a,
+                                         const double *b, int stride_b,
+                                         double *c, int stride_c,
+                                         int n, double alpha, double beta){
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if(row < n && col < n){
+        c[row * stride_c + col] = alpha * a[row * stride_a + col] + beta * b[row * stride_b + col];
     }
 }
 
-// CUDA Kernel: 標準矩陣乘法（用於 Strassen 的 7 次乘法）
-__global__ void matmul_kernel(const double *a, const double *b, double *c, int n){
+// CUDA Kernel: 標準矩陣乘法（支援 stride）
+__global__ void matmul_stride_kernel(const double *a, int stride_a,
+                                     const double *b, int stride_b,
+                                     double *c, int stride_c,
+                                     int n){
     __shared__ double As[32][32];
     __shared__ double Bs[32][32];
 
@@ -111,21 +117,14 @@ __global__ void matmul_kernel(const double *a, const double *b, double *c, int n
     int numTiles = (n + 31) / 32;
 
     for(int t = 0; t < numTiles; t++){
-        int aRow = row;
         int aCol = t * 32 + tx;
-        if(aRow < n && aCol < n){
-            As[ty][tx] = a[aRow * n + aCol];
-        } else {
-            As[ty][tx] = 0.0;
-        }
-
         int bRow = t * 32 + ty;
-        int bCol = col;
-        if(bRow < n && bCol < n){
-            Bs[ty][tx] = b[bRow * n + bCol];
-        } else {
-            Bs[ty][tx] = 0.0;
-        }
+        
+        As[ty][tx] = a[row * stride_a + aCol];
+        As[ty][tx] = 0.0;
+        
+        Bs[ty][tx] = b[bRow * stride_b + col];
+        Bs[ty][tx] = 0.0;
 
         __syncthreads();
 
@@ -138,8 +137,94 @@ __global__ void matmul_kernel(const double *a, const double *b, double *c, int n
     }
 
     if(row < n && col < n){
-        c[row * n + col] = sum;
+        c[row * stride_c + col] = sum;
     }
+}
+
+// 使用 Strassen 算法計算 tile 乘法：C_tile = A_tile * B_tile
+// 直接使用 stride 存取 quadrants，不需要 cudaMemcpy2D
+void strassen_tile_multiply(double *d_A_tile, double *d_B_tile, double *d_C_tile, 
+                           int tile_size, 
+                           double *d_work[], // 工作區陣列
+                           cudaStream_t stream) {
+    int n2 = tile_size / 2;  // quadrant 大小
+    
+    // 分配工作區索引
+    double *d_M1 = d_work[0], *d_M2 = d_work[1], *d_M3 = d_work[2], *d_M4 = d_work[3];
+    double *d_M5 = d_work[4], *d_M6 = d_work[5], *d_M7 = d_work[6];
+    double *d_tmp[5] = {d_work[7], d_work[8], d_work[9], d_work[10], d_work[11]};
+    
+    // A 和 B 的四個 quadrants（使用指標偏移，stride = tile_size）
+    double *A00 = d_A_tile;
+    double *A01 = d_A_tile + n2;
+    double *A10 = d_A_tile + n2 * tile_size;
+    double *A11 = d_A_tile + n2 * tile_size + n2;
+    
+    double *B00 = d_B_tile;
+    double *B01 = d_B_tile + n2;
+    double *B10 = d_B_tile + n2 * tile_size;
+    double *B11 = d_B_tile + n2 * tile_size + n2;
+    
+    // Kernel 參數
+    dim3 block(16, 16);
+    dim3 grid((n2 + 15) / 16, (n2 + 15) / 16);
+    dim3 mul_block(32, 32);
+    dim3 mul_grid((n2 + 31) / 32, (n2 + 31) / 32);
+    
+    // 計算 Strassen 的 7 個矩陣乘法
+    
+    // M1 = (A00 + A11) * (B00 + B11)
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(A00, tile_size, A11, tile_size, d_tmp[0], n2, n2, 1.0, 1.0);
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(B00, tile_size, B11, tile_size, d_tmp[1], n2, n2, 1.0, 1.0);
+    matmul_stride_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], n2, d_tmp[1], n2, d_M1, n2, n2);
+    
+    // M2 = (A10 + A11) * B00
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(A10, tile_size, A11, tile_size, d_tmp[0], n2, n2, 1.0, 1.0);
+    matmul_stride_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], n2, B00, tile_size, d_M2, n2, n2);
+    
+    // M3 = A00 * (B01 - B11)
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(B01, tile_size, B11, tile_size, d_tmp[0], n2, n2, 1.0, -1.0);
+    matmul_stride_kernel<<<mul_grid, mul_block, 0, stream>>>(A00, tile_size, d_tmp[0], n2, d_M3, n2, n2);
+    
+    // M4 = A11 * (B10 - B00)
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(B10, tile_size, B00, tile_size, d_tmp[0], n2, n2, 1.0, -1.0);
+    matmul_stride_kernel<<<mul_grid, mul_block, 0, stream>>>(A11, tile_size, d_tmp[0], n2, d_M4, n2, n2);
+    
+    // M5 = (A00 + A01) * B11
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(A00, tile_size, A01, tile_size, d_tmp[0], n2, n2, 1.0, 1.0);
+    matmul_stride_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], n2, B11, tile_size, d_M5, n2, n2);
+    
+    // M6 = (A10 - A00) * (B00 + B01)
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(A10, tile_size, A00, tile_size, d_tmp[0], n2, n2, 1.0, -1.0);
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(B00, tile_size, B01, tile_size, d_tmp[1], n2, n2, 1.0, 1.0);
+    matmul_stride_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], n2, d_tmp[1], n2, d_M6, n2, n2);
+    
+    // M7 = (A01 - A11) * (B10 + B11)
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(A01, tile_size, A11, tile_size, d_tmp[0], n2, n2, 1.0, -1.0);
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(B10, tile_size, B11, tile_size, d_tmp[1], n2, n2, 1.0, 1.0);
+    matmul_stride_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], n2, d_tmp[1], n2, d_M7, n2, n2);
+    
+    // 組合結果計算 C 的四個 quadrants（直接寫入 d_C_tile）
+    double *C00 = d_C_tile;
+    double *C01 = d_C_tile + n2;
+    double *C10 = d_C_tile + n2 * tile_size;
+    double *C11 = d_C_tile + n2 * tile_size + n2;
+    
+    // C00 = M1 + M4 - M5 + M7
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(d_M1, n2, d_M4, n2, d_tmp[2], n2, n2, 1.0, 1.0);
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(d_tmp[2], n2, d_M5, n2, d_tmp[3], n2, n2, 1.0, -1.0);
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(d_tmp[3], n2, d_M7, n2, C00, tile_size, n2, 1.0, 1.0);
+    
+    // C01 = M3 + M5
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(d_M3, n2, d_M5, n2, C01, tile_size, n2, 1.0, 1.0);
+    
+    // C10 = M2 + M4
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(d_M2, n2, d_M4, n2, C10, tile_size, n2, 1.0, 1.0);
+    
+    // C11 = M1 - M2 + M3 + M6
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(d_M1, n2, d_M2, n2, d_tmp[2], n2, n2, 1.0, -1.0);
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(d_tmp[2], n2, d_M3, n2, d_tmp[3], n2, n2, 1.0, 1.0);
+    add_matrix_stride_kernel<<<grid, block, 0, stream>>>(d_tmp[3], n2, d_M6, n2, C11, tile_size, n2, 1.0, 1.0);
 }
 
 // CUDA Kernel: 累加 tile 到全域矩陣
@@ -159,120 +244,6 @@ __global__ void accumulate_kernel(double *C_global, const double *C_tile,
             C_global[global_row * N + global_col] += C_tile[idx];
         }
     }
-}
-
-// 使用 Strassen 算法計算 tile 乘法：C_tile = A_tile * B_tile
-// 所有操作都在 device 上完成
-void strassen_tile_multiply(double *d_A_tile, double *d_B_tile, double *d_C_tile, 
-                           int tile_size, 
-                           double *d_work[], // 工作區陣列
-                           cudaStream_t stream) {
-    int n2 = tile_size / 2;  // quadrant 大小
-    // size_t quad_bytes = (size_t)n2 * n2 * sizeof(double);
-    
-    // 分配工作區索引（總共需要約 20 個 buffer）
-    double *d_A00 = d_work[0], *d_A01 = d_work[1], *d_A10 = d_work[2], *d_A11 = d_work[3];
-    double *d_B00 = d_work[4], *d_B01 = d_work[5], *d_B10 = d_work[6], *d_B11 = d_work[7];
-    double *d_M1 = d_work[8], *d_M2 = d_work[9], *d_M3 = d_work[10], *d_M4 = d_work[11];
-    double *d_M5 = d_work[12], *d_M6 = d_work[13], *d_M7 = d_work[14];
-    double *d_tmp[5] = {d_work[15], d_work[16], d_work[17], d_work[18], d_work[19]};
-    
-    // Kernel 參數
-    int add_threads = 256;
-    int add_blocks = (n2 * n2 + add_threads - 1) / add_threads;
-    dim3 mul_block(32, 32);
-    dim3 mul_grid((n2 + 31) / 32, (n2 + 31) / 32);
-    
-    // 步驟 1: 分割 A 和 B 成 4 個 quadrants
-    // 使用 cudaMemcpy2D 從 tile 中提取 quadrants
-    cudaMemcpy2DAsync(d_A00, n2 * sizeof(double), 
-                      d_A_tile, tile_size * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_A01, n2 * sizeof(double), 
-                      d_A_tile + n2, tile_size * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_A10, n2 * sizeof(double), 
-                      d_A_tile + n2 * tile_size, tile_size * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_A11, n2 * sizeof(double), 
-                      d_A_tile + n2 * tile_size + n2, tile_size * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    
-    cudaMemcpy2DAsync(d_B00, n2 * sizeof(double), 
-                      d_B_tile, tile_size * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_B01, n2 * sizeof(double), 
-                      d_B_tile + n2, tile_size * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_B10, n2 * sizeof(double), 
-                      d_B_tile + n2 * tile_size, tile_size * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_B11, n2 * sizeof(double), 
-                      d_B_tile + n2 * tile_size + n2, tile_size * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    
-    // 步驟 2: 計算 Strassen 的 7 個矩陣乘法
-    // M1 = (A00 + A11) * (B00 + B11)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A00, d_A11, d_tmp[0], n2, 1.0, 1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B00, d_B11, d_tmp[1], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_tmp[1], d_M1, n2);
-    
-    // M2 = (A10 + A11) * B00
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A10, d_A11, d_tmp[0], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_B00, d_M2, n2);
-    
-    // M3 = A00 * (B01 - B11)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B01, d_B11, d_tmp[0], n2, 1.0, -1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_A00, d_tmp[0], d_M3, n2);
-    
-    // M4 = A11 * (B10 - B00)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B10, d_B00, d_tmp[0], n2, 1.0, -1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_A11, d_tmp[0], d_M4, n2);
-    
-    // M5 = (A00 + A01) * B11
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A00, d_A01, d_tmp[0], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_B11, d_M5, n2);
-    
-    // M6 = (A10 - A00) * (B00 + B01)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A10, d_A00, d_tmp[0], n2, 1.0, -1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B00, d_B01, d_tmp[1], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_tmp[1], d_M6, n2);
-    
-    // M7 = (A01 - A11) * (B10 + B11)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A01, d_A11, d_tmp[0], n2, 1.0, -1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B10, d_B11, d_tmp[1], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_tmp[1], d_M7, n2);
-    
-    // 步驟 3: 組合結果計算 C 的四個 quadrants
-    // C00 = M1 + M4 - M5 + M7
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M1, d_M4, d_tmp[0], n2, 1.0, 1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_tmp[0], d_M5, d_tmp[1], n2, 1.0, -1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_tmp[1], d_M7, d_tmp[2], n2, 1.0, 1.0);
-    
-    // C01 = M3 + M5
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M3, d_M5, d_tmp[3], n2, 1.0, 1.0);
-    
-    // C10 = M2 + M4
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M2, d_M4, d_tmp[4], n2, 1.0, 1.0);
-    
-    // C11 = M1 - M2 + M3 + M6
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M1, d_M2, d_A00, n2, 1.0, -1.0); // 重用 d_A00
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A00, d_M3, d_A01, n2, 1.0, 1.0); // 重用 d_A01
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A01, d_M6, d_A10, n2, 1.0, 1.0); // 重用 d_A10
-    
-    // 步驟 4: 將四個 quadrants 合併回 C_tile
-    cudaMemcpy2DAsync(d_C_tile, tile_size * sizeof(double),
-                      d_tmp[2], n2 * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_C_tile + n2, tile_size * sizeof(double),
-                      d_tmp[3], n2 * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_C_tile + n2 * tile_size, tile_size * sizeof(double),
-                      d_tmp[4], n2 * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpy2DAsync(d_C_tile + n2 * tile_size + n2, tile_size * sizeof(double),
-                      d_A10, n2 * sizeof(double),
-                      n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
 }
 
 int main(int argc, char **argv){
@@ -373,10 +344,6 @@ int main(int argc, char **argv){
                 accumulate_kernel<<<acc_blocks, acc_threads, 0, stream>>>(
                     d_C_global, d_C_tile, C_row_offset, C_col_offset, TILE, N);
             }
-        }
-        
-        if((ti + 1) % (tiles / 10 > 0 ? tiles / 10 : 1) == 0){
-            printf("Progress: %d/%d tile rows completed\n", ti + 1, tiles);
         }
     }
 
