@@ -1,0 +1,25 @@
+==3129402== NVPROF is profiling process 3129402, command: ./exe/double/2w_88 4096 ./dataset/A_4096 ./dataset/B_4096 ./dataset/C_4096
+==3129402== Some kernel(s) will be replayed on device 0 in order to collect all events/metrics.
+==3129402== Profiling application: ./exe/double/2w_88 4096 ./dataset/A_4096 ./dataset/B_4096 ./dataset/C_4096
+==3129402== Profiling result:
+==3129402== Metric result:
+Invocations                               Metric Name                                         Metric Description         Min         Max         Avg
+Device "NVIDIA GeForce GTX 1080 (0)"
+    Kernel: block_mul_kernel(int, int, double*, double*, double*)
+          1                          gld_transactions                                   Global Load Transactions  4294967298  4294967298  4294967298
+          1                      global_load_requests   Total number of global load requests from Multiprocessor   536870912   536870912   536870912
+          1                          gst_transactions                                  Global Store Transactions     4194304     4194304     4194304
+          1                      dram_read_throughput                              Device Memory Read Throughput  33.464GB/s  33.464GB/s  33.464GB/s
+          1                   stall_memory_dependency                         Issue Stall Reasons (Data Request)       2.94%       2.94%       2.94%
+          1                     stall_exec_dependency                 Issue Stall Reasons (Execution Dependency)      93.56%      93.56%      93.56%
+          1                        achieved_occupancy                                         Achieved Occupancy    0.187350    0.187350    0.187350
+          1                             sm_efficiency                                    Multiprocessor Activity      99.75%      99.75%      99.75%
+          1                  shared_load_transactions                                   Shared Load Transactions  2147483648  2147483648  2147483648
+          1                    shared_load_throughput                              Shared Memory Load Throughput  475.17GB/s  475.17GB/s  475.17GB/s
+          1                 shared_store_transactions                                  Shared Store Transactions   536870912   536870912   536870912
+          1                   shared_store_throughput                             Shared Memory Store Throughput  118.79GB/s  118.79GB/s  118.79GB/s
+          1                         shared_efficiency                                   Shared Memory Efficiency      25.00%      25.00%      25.00%
+          1                        shared_utilization                                  Shared Memory Utilization     Low (2)     Low (2)     Low (2)
+          1                                inst_fp_64                                    FP Instructions(Double)  6.8719e+10  6.8719e+10  6.8719e+10
+          1                             flop_count_dp                Floating Point Operations(Double Precision)  1.3744e+11  1.3744e+11  1.3744e+11
+          1                        flop_dp_efficiency                               FLOP Efficiency(Peak Double)      83.41%      83.41%      83.41%

@@ -1,0 +1,20 @@
+==2183354== NVPROF is profiling process 2183354, command: ./exe/double/2w 512 ./dataset/A_512 ./dataset/B_512 ./dataset/C_512
+==2183354== Profiling application: ./exe/double/2w 512 ./dataset/A_512 ./dataset/B_512 ./dataset/C_512
+==2183354== Profiling result:
+            Type  Time(%)      Time     Calls       Avg       Min       Max  Name
+ GPU activities:   58.68%  1.2241ms         1  1.2241ms  1.2241ms  1.2241ms  block_mul_kernel(int, int, double*, double*, double*)
+                   33.15%  691.50us         2  345.75us  341.51us  349.99us  [CUDA memcpy HtoD]
+                    8.17%  170.37us         1  170.37us  170.37us  170.37us  [CUDA memcpy DtoH]
+      API calls:   94.06%  74.603ms         3  24.868ms  67.634us  74.465ms  cudaMalloc
+                    4.99%  3.9592ms         3  1.3197ms  525.59us  2.8532ms  cudaMemcpy
+                    0.38%  304.68us         3  101.56us  79.895us  143.89us  cudaFree
+                    0.20%  156.48us         1  156.48us  156.48us  156.48us  cudaLaunchKernel
+                    0.19%  153.43us       114  1.3450us      93ns  69.900us  cuDeviceGetAttribute
+                    0.14%  109.27us         1  109.27us  109.27us  109.27us  cudaGetDeviceProperties
+                    0.02%  15.606us         1  15.606us  15.606us  15.606us  cuDeviceGetName
+                    0.01%  6.4050us         1  6.4050us  6.4050us  6.4050us  cuDeviceGetPCIBusId
+                    0.00%  1.2060us         3     402ns      96ns     972ns  cuDeviceGetCount
+                    0.00%     545ns         2     272ns     103ns     442ns  cuDeviceGet
+                    0.00%     485ns         1     485ns     485ns     485ns  cuDeviceTotalMem
+                    0.00%     342ns         1     342ns     342ns     342ns  cuModuleGetLoadingMode
+                    0.00%     226ns         1     226ns     226ns     226ns  cuDeviceGetUuid

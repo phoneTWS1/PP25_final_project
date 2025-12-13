@@ -1,0 +1,30 @@
+==2183426== NVPROF is profiling process 2183426, command: ./exe/double/2w 8192 ./dataset/A_8192 ./dataset/B_8192 ./dataset/C_8192
+Mismatch at index 0: Result=2033.707393, True=2060.782959, Error=27.075567
+Mismatch at index 1: Result=2053.417775, True=2062.369141, Error=8.951366
+Mismatch at index 2: Result=2055.655500, True=2062.586426, Error=6.930926
+Mismatch at index 3: Result=2070.177063, True=2061.247559, Error=8.929504
+Mismatch at index 4: Result=2050.806055, True=2026.939819, Error=23.866236
+Mismatch at index 5: Result=2066.645653, True=2087.914551, Error=21.268898
+Mismatch at index 6: Result=2031.042904, True=2074.158447, Error=43.115543
+Mismatch at index 7: Result=2063.648985, True=2038.656372, Error=24.992613
+Mismatch at index 8: Result=2028.380300, True=2057.863037, Error=29.482737
+Mismatch at index 9: Result=2062.163247, True=2050.067627, Error=12.095620
+==2183426== Profiling application: ./exe/double/2w 8192 ./dataset/A_8192 ./dataset/B_8192 ./dataset/C_8192
+==2183426== Profiling result:
+            Type  Time(%)      Time     Calls       Avg       Min       Max  Name
+ GPU activities:   90.43%  4.44467s         1  4.44467s  4.44467s  4.44467s  block_mul_kernel(int, int, double*, double*, double*)
+                    4.87%  239.59ms         2  119.79ms  119.27ms  120.31ms  [CUDA memcpy HtoD]
+                    4.69%  230.70ms         1  230.70ms  230.70ms  230.70ms  [CUDA memcpy DtoH]
+      API calls:   98.21%  4.91673s         3  1.63891s  119.52ms  4.67671s  cudaMemcpy
+                    1.52%  76.009ms         3  25.336ms  98.202us  75.798ms  cudaMalloc
+                    0.27%  13.360ms         3  4.4533ms  421.20us  6.5203ms  cudaFree
+                    0.00%  173.24us         1  173.24us  173.24us  173.24us  cudaLaunchKernel
+                    0.00%  154.38us       114  1.3540us     100ns  65.083us  cuDeviceGetAttribute
+                    0.00%  116.08us         1  116.08us  116.08us  116.08us  cudaGetDeviceProperties
+                    0.00%  14.234us         1  14.234us  14.234us  14.234us  cuDeviceGetName
+                    0.00%  5.7170us         1  5.7170us  5.7170us  5.7170us  cuDeviceGetPCIBusId
+                    0.00%  1.2670us         3     422ns     126ns  1.0010us  cuDeviceGetCount
+                    0.00%     749ns         2     374ns     128ns     621ns  cuDeviceGet
+                    0.00%     521ns         1     521ns     521ns     521ns  cuDeviceTotalMem
+                    0.00%     415ns         1     415ns     415ns     415ns  cuModuleGetLoadingMode
+                    0.00%     276ns         1     276ns     276ns     276ns  cuDeviceGetUuid

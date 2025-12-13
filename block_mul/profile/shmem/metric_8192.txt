@@ -1,0 +1,24 @@
+==3119855== NVPROF is profiling process 3119855, command: ./exe/double/shmem 8192 ./dataset/A_8192 ./dataset/B_8192 ./dataset/C_8192
+==3119855== Some kernel(s) will be replayed on device 0 in order to collect all events/metrics.
+Mismatch at index 0: Result=2033.707393, True=2060.782959, Error=27.075567
+Mismatch at index 1: Result=2053.417775, True=2062.369141, Error=8.951366
+Mismatch at index 2: Result=2055.655500, True=2062.586426, Error=6.930926
+Mismatch at index 3: Result=2070.177063, True=2061.247559, Error=8.929504
+Mismatch at index 4: Result=2050.806055, True=2026.939819, Error=23.866236
+Mismatch at index 5: Result=2066.645653, True=2087.914551, Error=21.268898
+Mismatch at index 6: Result=2031.042904, True=2074.158447, Error=43.115543
+Mismatch at index 7: Result=2063.648985, True=2038.656372, Error=24.992613
+Mismatch at index 8: Result=2028.380300, True=2057.863037, Error=29.482737
+Mismatch at index 9: Result=2062.163247, True=2050.067627, Error=12.095620
+==3119855== Profiling application: ./exe/double/shmem 8192 ./dataset/A_8192 ./dataset/B_8192 ./dataset/C_8192
+==3119855== Profiling result:
+==3119855== Metric result:
+Invocations                               Metric Name                                         Metric Description         Min         Max         Avg
+Device "NVIDIA GeForce GTX 1080 (0)"
+    Kernel: block_mul_kernel(int, int, double*, double*, double*)
+          1                          gld_transactions                                   Global Load Transactions  3.4360e+10  3.4360e+10  3.4360e+10
+          1                      global_load_requests   Total number of global load requests from Multiprocessor  4294967296  4294967296  4294967296
+          1                      dram_read_throughput                              Device Memory Read Throughput  15.165GB/s  15.165GB/s  15.165GB/s
+          1                   stall_memory_dependency                         Issue Stall Reasons (Data Request)       3.36%       3.36%       3.36%
+          1                        achieved_occupancy                                         Achieved Occupancy    0.999838    0.999838    0.999838
+==3119855== Warning: One or more events or metrics overflowed. Rerun with "--print-gpu-trace" for detail.

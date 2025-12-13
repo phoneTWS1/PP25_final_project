@@ -1,0 +1,14 @@
+==3117628== NVPROF is profiling process 3117628, command: ./exe/double/gmem 2048 ./dataset/A_2048 ./dataset/B_2048 ./dataset/C_2048
+==3117628== Some kernel(s) will be replayed on device 0 in order to collect all events/metrics.
+==3117628== Profiling application: ./exe/double/gmem 2048 ./dataset/A_2048 ./dataset/B_2048 ./dataset/C_2048
+==3117628== Profiling result:
+==3117628== Metric result:
+Invocations                               Metric Name                                         Metric Description         Min         Max         Avg
+Device "NVIDIA GeForce GTX 1080 (0)"
+    Kernel: block_mul_kernel(int, int, double*, double*, double*)
+          1                          gld_transactions                                   Global Load Transactions  1.7184e+10  1.7184e+10  1.7184e+10
+          1                      global_load_requests   Total number of global load requests from Multiprocessor  2148007936  2148007936  2148007936
+          1                      dram_read_throughput                              Device Memory Read Throughput  20.401GB/s  20.401GB/s  20.401GB/s
+          1                   stall_memory_dependency                         Issue Stall Reasons (Data Request)      90.72%      90.72%      90.72%
+          1                        achieved_occupancy                                         Achieved Occupancy    0.997393    0.997393    0.997393
+          1                             sm_efficiency                                    Multiprocessor Activity      99.59%      99.59%      99.59%
