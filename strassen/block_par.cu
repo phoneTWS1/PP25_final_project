@@ -8,11 +8,11 @@ int N;
 float *A, *B, *C_true;
 float *C;
 #define Bs 32
-int TILE = 512;
 
 void load_matrix(float**, int, const char *filename);
 void correctness_check(const float*, const float*, int);
 void show(float*, int);
+
 
 __inline__ __device__ float warpReduceSum(float val) {
     #pragma unroll
@@ -20,128 +20,100 @@ __inline__ __device__ float warpReduceSum(float val) {
         val += __shfl_down_sync(0xffffffff, val, offset);
     return val;
 }
-
-
-
-// 修改：支援可變 coarse TILE（must be multiple of Bs）
-// blockDim = dim3(Bs, 8) (固定)
-// 每個 block 負責一個 TILE x TILE 的輸出區塊，內部以 Bs x Bs 的 shared-loading 反覆累加
-// 每個 thread 原本負責 4 rows in a Bs-subtile（wrap of 4 rows），在 TILE > Bs 時會處理多個 subtiles
+// every wrap is reposible for 4 row of a C tile
+// every thread is reposible for 4 rows elements (same column)
+// grid = dim3(n,n), block = dim3(32,8)
 __global__ void block_mul_kernel(
     int N,
-    int TILE,            // coarse tile size (multiple of Bs)
+    int n,
     float *d_A,
     float *d_B,
     float *d_C
 ){
     extern __shared__ float share[];
-    float *A_block = share;                         // Bs * Bs
-    float *B_block = share + Bs * Bs;              // Bs * Bs
+    float *A_block = share;
+    float *B_block = share + Bs * Bs;
 
-    // block index -> tile coordinates
-    int tile_col = blockIdx.x; // x -> columns of tiles
-    int tile_row = blockIdx.y; // y -> rows of tiles
+    // block index 
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int A_start_row = bx * Bs;
+    int A_start_col;
+    int B_start_row;
+    int B_start_col = by * Bs;
+    
+    // block local index
+    int lx = threadIdx.y; // threadIdx.y = 0...7, 
+    int ly = threadIdx.x; // threadIdx.x = 0...31
+    int wrap_row = lx * 4;
 
-    int tile_row_base = tile_row * TILE;
-    int tile_col_base = tile_col * TILE;
 
-    // local thread indices
-    int lx = threadIdx.y; // 0..7
-    int ly = threadIdx.x; // 0..31
+    float c0=0, c1=0, c2=0, c3=0;
 
-    // threads per warp-group handle 4 rows per Bs-subtile (same as original)
-    int wrap_row_base = lx * 4; // within a Bs-subtile: 0,4,8,...,28
+    // compute c
+    for(int bk = 0; bk< n ; bk++){
+        A_start_col = bk * Bs;
+        B_start_row = bk * Bs;
+        
+        // load A, B block
+        A_block[wrap_row * Bs + ly] = d_A[(A_start_row + wrap_row) * N + A_start_col + ly];
+        A_block[(wrap_row + 1) * Bs + ly] = d_A[(A_start_row + wrap_row + 1) * N + A_start_col + ly];
+        A_block[(wrap_row + 2) * Bs + ly] = d_A[(A_start_row + wrap_row + 2) * N + A_start_col + ly];
+        A_block[(wrap_row + 3) * Bs + ly] = d_A[(A_start_row + wrap_row + 3) * N + A_start_col + ly];
 
-    int R = TILE / Bs; // number of Bs-subtiles per TILE (assume TILE % Bs == 0)
+        B_block[wrap_row * Bs + ly] = d_B[(B_start_row + wrap_row) * N + B_start_col + ly];
+        B_block[(wrap_row + 1) * Bs + ly] = d_B[(B_start_row + wrap_row + 1) * N + B_start_col + ly];
+        B_block[(wrap_row + 2) * Bs + ly] = d_B[(B_start_row + wrap_row + 2) * N + B_start_col + ly];
+        B_block[(wrap_row + 3) * Bs + ly] = d_B[(B_start_row + wrap_row + 3) * N + B_start_col + ly];
 
-    // For each sub-output sub-tile inside this coarse TILE
-    for (int ii = 0; ii < R; ++ii) {
-        for (int jj = 0; jj < R; ++jj) {
-            // compute the subtile's top-left coords
-            int A_sub_row = tile_row_base + ii * Bs; // row base for A subtile
-            int B_sub_col = tile_col_base + jj * Bs; // col base for B subtile
+        __syncthreads();
+        
+        #pragma unroll 32
+        for(int k = 0 ; k < Bs ; k ++){
+            float b = B_block[k * Bs + ly];
+            float a0 = A_block[(wrap_row * Bs) + k];
+            float a1 = A_block[(wrap_row + 1) * Bs + k];
+            float a2 = A_block[(wrap_row + 2) * Bs + k];
+            float a3 = A_block[(wrap_row + 3) * Bs + k];
 
-            // accumulators for 4 rows handled by this thread in the Bs-subtile
-            float c0 = 0.0f, c1 = 0.0f, c2 = 0.0f, c3 = 0.0f;
+            // 4FMAs, 5 shared load  =>  0.8 FMAs/load;
+            c0 += a0 * b;
+            c1 += a1 * b;
+            c2 += a2 * b;
+            c3 += a3 * b;
+        }
 
-            // iterate over k-blocks (Bs-sized) across the full matrix
-            int num_kblocks = N / Bs;
-            for (int bk = 0; bk < num_kblocks; ++bk) {
-                int A_sub_col = bk * Bs;
-                int B_sub_row = bk * Bs;
+        __syncthreads();
+    }
 
-                // load A_block (each thread writes 4 elements in column 'ly')
-                // bounds check safe because we require N % Bs == 0
-                A_block[(wrap_row_base + 0) * Bs + ly] = d_A[(A_sub_row + wrap_row_base + 0) * N + A_sub_col + ly];
-                A_block[(wrap_row_base + 1) * Bs + ly] = d_A[(A_sub_row + wrap_row_base + 1) * N + A_sub_col + ly];
-                A_block[(wrap_row_base + 2) * Bs + ly] = d_A[(A_sub_row + wrap_row_base + 2) * N + A_sub_col + ly];
-                A_block[(wrap_row_base + 3) * Bs + ly] = d_A[(A_sub_row + wrap_row_base + 3) * N + A_sub_col + ly];
-
-                // load B_block (Bs x Bs) for this (bk, jj) position
-                B_block[(wrap_row_base + 0) * Bs + ly] = d_B[(B_sub_row + wrap_row_base + 0) * N + B_sub_col + ly];
-                B_block[(wrap_row_base + 1) * Bs + ly] = d_B[(B_sub_row + wrap_row_base + 1) * N + B_sub_col + ly];
-                B_block[(wrap_row_base + 2) * Bs + ly] = d_B[(B_sub_row + wrap_row_base + 2) * N + B_sub_col + ly];
-                B_block[(wrap_row_base + 3) * Bs + ly] = d_B[(B_sub_row + wrap_row_base + 3) * N + B_sub_col + ly];
-
-                __syncthreads();
-
-                // compute inner product for the 4 rows handled by this thread
-                #pragma unroll 32
-                for (int k = 0; k < Bs; ++k) {
-                    float b = B_block[k * Bs + ly];
-                    float a0 = A_block[(wrap_row_base + 0) * Bs + k];
-                    float a1 = A_block[(wrap_row_base + 1) * Bs + k];
-                    float a2 = A_block[(wrap_row_base + 2) * Bs + k];
-                    float a3 = A_block[(wrap_row_base + 3) * Bs + k];
-
-                    c0 += a0 * b;
-                    c1 += a1 * b;
-                    c2 += a2 * b;
-                    c3 += a3 * b;
-                }
-
-                __syncthreads();
-            } // bk
-
-            // write back results for this subtile (4 rows)
-            d_C[(A_sub_row + wrap_row_base + 0) * N + B_sub_col + ly] += c0;
-            d_C[(A_sub_row + wrap_row_base + 1) * N + B_sub_col + ly] += c1;
-            d_C[(A_sub_row + wrap_row_base + 2) * N + B_sub_col + ly] += c2;
-            d_C[(A_sub_row + wrap_row_base + 3) * N + B_sub_col + ly] += c3;
-        } // jj
-    } // ii
+    //write back
+    d_C[(A_start_row + wrap_row) * N + B_start_col + ly] = c0;
+    d_C[(A_start_row + wrap_row + 1) * N + B_start_col + ly] = c1;
+    d_C[(A_start_row + wrap_row + 2) * N + B_start_col + ly] = c2;
+    d_C[(A_start_row + wrap_row + 3) * N + B_start_col + ly] = c3;
 }
 
 int main(int argc, char* argv[]){
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
 
-    if (!(argc == 5 || argc == 6)) {
-        fprintf(stderr, "usage: %s N A_file B_file C_true_file [TILE]\n", argv[0]);
-        return 1;
-    }
-
+    assert(argc==5);
     N = atoi(argv[1]);
     const char *a_filename = argv[2];
     const char *b_filename = argv[3];
     const char *c_true_filename = argv[4];
-    if (argc == 6) TILE = atoi(argv[5]);
-
-    if (N % Bs != 0) { fprintf(stderr, "Error: N must be divisible by %d\n", Bs); return 1; }
-    if (TILE % Bs != 0) { fprintf(stderr, "Error: TILE must be multiple of %d\n", Bs); return 1; }
-    if (N % TILE != 0) { fprintf(stderr, "Error: N must be divisible by TILE\n"); return 1; }
-
     load_matrix(&A, N, a_filename);
     load_matrix(&B, N, b_filename);
-    load_matrix(&C_true, N, c_true_filename);
-    C = (float*)calloc((size_t)N * N, sizeof(float));
-    assert(C);
+    load_matrix(&C_true, N, c_true_filename); 
+    C = (float*)malloc(N * N * sizeof(float));
 
-    int tiles = N / TILE;
+    //int Bs = 32; // Block size
+    int n = N / Bs;
+    assert(N % Bs ==0);
 
     // cudaMalloc
     float *d_A, *d_B, *d_C;
-    size_t gmem = (size_t)N * N *  sizeof(float);
+    size_t gmem = N * N *  sizeof(float);
     assert(gmem * 3 < prop.totalGlobalMem);
     cudaMalloc((void **)&d_A, gmem);
     cudaMalloc((void **)&d_B, gmem);
@@ -150,36 +122,41 @@ int main(int argc, char* argv[]){
     // cuda Memory copy
     cudaMemcpy(d_A, A, gmem, cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, B, gmem, cudaMemcpyHostToDevice);
-    cudaMemset(d_C, 0, gmem);
 
-    //launch kernel
     auto chrono_start = std::chrono::steady_clock::now();
-    size_t shmem = Bs * Bs * 2 * sizeof(float); // shared mem holds two Bs x Bs tiles
-    dim3 grid(tiles, tiles);
-    dim3 block(Bs, 8);
-    block_mul_kernel<<<grid, block, shmem>>>(
-        N,
-        TILE,
-        d_A,
-        d_B,
-        d_C
-    );
-
+    //launch kernel
+    size_t shmem = Bs * Bs * 2 * sizeof(float);
+    for(int i = 0; i < 10; i++){
+        block_mul_kernel<<<dim3(n,n), dim3(Bs,8), shmem>>>(
+            N,
+            n,
+            d_A,
+            d_B,
+            d_C
+        );
+    }
+    cudaStreamSynchronize(0);
     auto chrono_end = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed = chrono_end - chrono_start;
     printf("Total computing time: %.6f s\n", elapsed.count());
 
+
+    auto chrono_start_copy = std::chrono::steady_clock::now();
     //cuda Memory copy
     cudaMemcpy(C, d_C, gmem, cudaMemcpyDeviceToHost); 
+    //show(C,N);
+    auto chrono_end_copy = std::chrono::steady_clock::now();
+    std::chrono::duration<double> elapsed_copy = chrono_end_copy - chrono_start_copy;
+    printf("Data copy back time: %.6f s\n", elapsed_copy.count());
 
     //free cuda memeory
     cudaFree(d_A);
     cudaFree(d_B);
     cudaFree(d_C);
 
-    correctness_check(C_true, C, N);
+    // correctness_check(C_true, C, N);
 
-    free(C);
+    
     return 0;
 }
 

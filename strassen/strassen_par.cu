@@ -9,8 +9,8 @@
 static int N;
 static double *A, *B, *C_result, *C_true;
 
-#define TILE 512  // 每個 tile 大小（必須為偶數）
-#define NUM_STREAMS 8  // 使用的 stream 數量
+#define TILE 512
+#define NUM_STREAMS 20
 
 void load_matrix(double **mat_ptr, int N_dim, const char *filename) {
     long long size = (long long)N_dim * N_dim;
@@ -88,17 +88,99 @@ void cleanup_memory() {
     if (C_result) free(C_result);
 }
 
-// CUDA Kernel: 矩陣加法/減法
-__global__ void add_matrix_kernel(const double *a, const double *b, double *c, int n, double alpha, double beta){
-    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    long long total = (long long)n * n;
-
-    if(idx < total){
-        c[idx] = alpha * a[idx] + beta * b[idx];
+// ============================================================================
+// Kernel Fusion 1: 合併矩陣加法和乘法的準備階段
+// 一次 kernel 完成多個加減法操作
+// ============================================================================
+__global__ void fused_strassen_prep_kernel(
+    const double *A00, const double *A01, const double *A10, const double *A11,
+    const double *B00, const double *B01, const double *B10, const double *B11,
+    double *S1, double *S2, double *S3, double *S4,  // A 的中間結果
+    double *T1, double *T2, double *T3, double *T4,  // B 的中間結果
+    int n) 
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n * n;
+    
+    if(idx < total) {
+        // S1 = A00 + A11  (for M1)
+        S1[idx] = A00[idx] + A11[idx];
+        
+        // S2 = A10 + A11  (for M2)
+        S2[idx] = A10[idx] + A11[idx];
+        
+        // S3 = A00 + A01  (for M5)
+        S3[idx] = A00[idx] + A01[idx];
+        
+        // S4 = A10 - A00  (for M6)
+        S4[idx] = A10[idx] - A00[idx];
+        
+        // T1 = B00 + B11  (for M1)
+        T1[idx] = B00[idx] + B11[idx];
+        
+        // T2 = B01 - B11  (for M3)
+        T2[idx] = B01[idx] - B11[idx];
+        
+        // T3 = B10 - B00  (for M4)
+        T3[idx] = B10[idx] - B00[idx];
+        
+        // T4 = B00 + B01  (for M6)
+        T4[idx] = B00[idx] + B01[idx];
     }
 }
 
-// CUDA Kernel: 標準矩陣乘法（用於 Strassen 的 7 次乘法）
+// ============================================================================
+// Kernel Fusion 2: 合併最後的結果組合
+// 一次 kernel 完成所有四個 quadrant 的計算
+// ============================================================================
+__global__ void fused_strassen_combine_kernel(
+    const double *M1, const double *M2, const double *M3, 
+    const double *M4, const double *M5, const double *M6, const double *M7,
+    double *C00, double *C01, double *C10, double *C11,
+    int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n * n;
+    
+    if(idx < total) {
+        // C00 = M1 + M4 - M5 + M7
+        C00[idx] = M1[idx] + M4[idx] - M5[idx] + M7[idx];
+        
+        // C01 = M3 + M5
+        C01[idx] = M3[idx] + M5[idx];
+        
+        // C10 = M2 + M4
+        C10[idx] = M2[idx] + M4[idx];
+        
+        // C11 = M1 - M2 + M3 + M6
+        C11[idx] = M1[idx] - M2[idx] + M3[idx] + M6[idx];
+    }
+}
+
+// ============================================================================
+// Kernel Fusion 3: 合併 M7 的準備和其他操作
+// ============================================================================
+__global__ void fused_m7_prep_kernel(
+    const double *A01, const double *A11,
+    const double *B10, const double *B11,
+    double *S5, double *T5,
+    int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n * n;
+    
+    if(idx < total) {
+        // S5 = A01 - A11  (for M7)
+        S5[idx] = A01[idx] - A11[idx];
+        
+        // T5 = B10 + B11  (for M7)
+        T5[idx] = B10[idx] + B11[idx];
+    }
+}
+
+// ============================================================================
+// 標準矩陣乘法 kernel (保持不變)
+// ============================================================================
 __global__ void matmul_kernel(const double *a, const double *b, double *c, int n){
     __shared__ double As[32][32];
     __shared__ double Bs[32][32];
@@ -143,7 +225,9 @@ __global__ void matmul_kernel(const double *a, const double *b, double *c, int n
     }
 }
 
-// CUDA Kernel: 累加 tile 到全域矩陣（使用 atomic add 避免 race condition）
+// ============================================================================
+// 累加 kernel (保持不變)
+// ============================================================================
 __global__ void accumulate_kernel(double *C_global, const double *C_tile,
                                   int C_row_offset, int C_col_offset, 
                                   int tile_size, int N) {
@@ -162,23 +246,34 @@ __global__ void accumulate_kernel(double *C_global, const double *C_tile,
     }
 }
 
-// 使用 Strassen 算法計算 tile 乘法：C_tile = A_tile * B_tile
-void strassen_tile_multiply(double *d_A_tile, double *d_B_tile, double *d_C_tile, 
-                           int tile_size, 
-                           double *d_work[], // 工作區陣列
-                           cudaStream_t stream) {
-    int n2 = tile_size / 2;  // quadrant 大小
+// ============================================================================
+// 優化後的 Strassen tile multiply 函數
+// ============================================================================
+void strassen_tile_multiply_fused(
+    double *d_A_tile, double *d_B_tile, double *d_C_tile, 
+    int tile_size, 
+    double *d_work[],
+    cudaStream_t stream) 
+{
+    int n2 = tile_size / 2;
     
-    // 分配工作區索引（總共需要約 20 個 buffer）
+    // 分配工作區索引
     double *d_A00 = d_work[0], *d_A01 = d_work[1], *d_A10 = d_work[2], *d_A11 = d_work[3];
     double *d_B00 = d_work[4], *d_B01 = d_work[5], *d_B10 = d_work[6], *d_B11 = d_work[7];
     double *d_M1 = d_work[8], *d_M2 = d_work[9], *d_M3 = d_work[10], *d_M4 = d_work[11];
     double *d_M5 = d_work[12], *d_M6 = d_work[13], *d_M7 = d_work[14];
-    double *d_tmp[5] = {d_work[15], d_work[16], d_work[17], d_work[18], d_work[19]};
+    
+    // 用於 fused kernels 的中間結果
+    double *d_S1 = d_work[15], *d_S2 = d_work[16], *d_S3 = d_work[17];
+    double *d_S4 = d_work[18], *d_S5 = d_work[19];
+    double *d_T1 = d_work[20], *d_T2 = d_work[21], *d_T3 = d_work[22];
+    double *d_T4 = d_work[23], *d_T5 = d_work[24];
+    
+    double *d_C00 = d_work[25], *d_C01 = d_work[26], *d_C10 = d_work[27], *d_C11 = d_work[28];
     
     // Kernel 參數
-    int add_threads = 256;
-    int add_blocks = (n2 * n2 + add_threads - 1) / add_threads;
+    int threads = 256;
+    int blocks = (n2 * n2 + threads - 1) / threads;
     dim3 mul_block(32, 32);
     dim3 mul_grid((n2 + 31) / 32, (n2 + 31) / 32);
     
@@ -209,67 +304,62 @@ void strassen_tile_multiply(double *d_A_tile, double *d_B_tile, double *d_C_tile
                       d_B_tile + n2 * tile_size + n2, tile_size * sizeof(double),
                       n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
     
-    // 步驟 2: 計算 Strassen 的 7 個矩陣乘法
-    // M1 = (A00 + A11) * (B00 + B11)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A00, d_A11, d_tmp[0], n2, 1.0, 1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B00, d_B11, d_tmp[1], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_tmp[1], d_M1, n2);
+    // 步驟 2: 使用 fused kernel 準備 M1-M6 的輸入 (一次完成 8 個加減法)
+    fused_strassen_prep_kernel<<<blocks, threads, 0, stream>>>(
+        d_A00, d_A01, d_A10, d_A11,
+        d_B00, d_B01, d_B10, d_B11,
+        d_S1, d_S2, d_S3, d_S4,
+        d_T1, d_T2, d_T3, d_T4,
+        n2
+    );
     
-    // M2 = (A10 + A11) * B00
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A10, d_A11, d_tmp[0], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_B00, d_M2, n2);
+    // 步驟 3: 計算 M1-M6
+    // M1 = S1 * T1 = (A00 + A11) * (B00 + B11)
+    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_S1, d_T1, d_M1, n2);
     
-    // M3 = A00 * (B01 - B11)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B01, d_B11, d_tmp[0], n2, 1.0, -1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_A00, d_tmp[0], d_M3, n2);
+    // M2 = S2 * B00 = (A10 + A11) * B00
+    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_S2, d_B00, d_M2, n2);
     
-    // M4 = A11 * (B10 - B00)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B10, d_B00, d_tmp[0], n2, 1.0, -1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_A11, d_tmp[0], d_M4, n2);
+    // M3 = A00 * T2 = A00 * (B01 - B11)
+    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_A00, d_T2, d_M3, n2);
     
-    // M5 = (A00 + A01) * B11
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A00, d_A01, d_tmp[0], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_B11, d_M5, n2);
+    // M4 = A11 * T3 = A11 * (B10 - B00)
+    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_A11, d_T3, d_M4, n2);
     
-    // M6 = (A10 - A00) * (B00 + B01)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A10, d_A00, d_tmp[0], n2, 1.0, -1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B00, d_B01, d_tmp[1], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_tmp[1], d_M6, n2);
+    // M5 = S3 * B11 = (A00 + A01) * B11
+    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_S3, d_B11, d_M5, n2);
     
-    // M7 = (A01 - A11) * (B10 + B11)
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A01, d_A11, d_tmp[0], n2, 1.0, -1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_B10, d_B11, d_tmp[1], n2, 1.0, 1.0);
-    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_tmp[0], d_tmp[1], d_M7, n2);
+    // M6 = S4 * T4 = (A10 - A00) * (B00 + B01)
+    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_S4, d_T4, d_M6, n2);
     
-    // 步驟 3: 組合結果計算 C 的四個 quadrants
-    // C00 = M1 + M4 - M5 + M7
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M1, d_M4, d_tmp[0], n2, 1.0, 1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_tmp[0], d_M5, d_tmp[1], n2, 1.0, -1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_tmp[1], d_M7, d_tmp[2], n2, 1.0, 1.0);
+    // 步驟 4: 準備 M7 的輸入 (單獨的 fused kernel)
+    fused_m7_prep_kernel<<<blocks, threads, 0, stream>>>(
+        d_A01, d_A11, d_B10, d_B11,
+        d_S5, d_T5, n2
+    );
     
-    // C01 = M3 + M5
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M3, d_M5, d_tmp[3], n2, 1.0, 1.0);
+    // M7 = S5 * T5 = (A01 - A11) * (B10 + B11)
+    matmul_kernel<<<mul_grid, mul_block, 0, stream>>>(d_S5, d_T5, d_M7, n2);
     
-    // C10 = M2 + M4
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M2, d_M4, d_tmp[4], n2, 1.0, 1.0);
+    // 步驟 5: 使用 fused kernel 組合所有結果 (一次完成 4 個 quadrant)
+    fused_strassen_combine_kernel<<<blocks, threads, 0, stream>>>(
+        d_M1, d_M2, d_M3, d_M4, d_M5, d_M6, d_M7,
+        d_C00, d_C01, d_C10, d_C11,
+        n2
+    );
     
-    // C11 = M1 - M2 + M3 + M6
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_M1, d_M2, d_A00, n2, 1.0, -1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A00, d_M3, d_A01, n2, 1.0, 1.0);
-    add_matrix_kernel<<<add_blocks, add_threads, 0, stream>>>(d_A01, d_M6, d_A10, n2, 1.0, 1.0);
-    
-    // 步驟 4: 將四個 quadrants 合併回 C_tile
+    // 步驟 6: 將四個 quadrants 合併回 C_tile
     cudaMemcpy2DAsync(d_C_tile, tile_size * sizeof(double),
-                      d_tmp[2], n2 * sizeof(double),
+                      d_C00, n2 * sizeof(double),
                       n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
     cudaMemcpy2DAsync(d_C_tile + n2, tile_size * sizeof(double),
-                      d_tmp[3], n2 * sizeof(double),
+                      d_C01, n2 * sizeof(double),
                       n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
     cudaMemcpy2DAsync(d_C_tile + n2 * tile_size, tile_size * sizeof(double),
-                      d_tmp[4], n2 * sizeof(double),
+                      d_C10, n2 * sizeof(double),
                       n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
     cudaMemcpy2DAsync(d_C_tile + n2 * tile_size + n2, tile_size * sizeof(double),
-                      d_A10, n2 * sizeof(double),
+                      d_C11, n2 * sizeof(double),
                       n2 * sizeof(double), n2, cudaMemcpyDeviceToDevice, stream);
 }
 
@@ -290,7 +380,7 @@ int main(int argc, char **argv){
         return 1;
     }
 
-    printf("Loading data for N=%d with TILE=%d (Multi-stream Strassen)...\n", N, TILE);
+    printf("Loading data for N=%d with TILE=%d (Kernel Fusion Strassen)...\n", N, TILE);
     load_matrix(&A, N, a_filename);
     load_matrix(&B, N, b_filename);
     load_matrix(&C_true, N, c_true_filename);
@@ -307,22 +397,22 @@ int main(int argc, char **argv){
     int n2 = TILE / 2;
     size_t quad_bytes = (size_t)n2 * n2 * sizeof(double);
 
-    // 分配 device 記憶體（全域矩陣）
+    // 分配 device 記憶體
     double *d_A, *d_B, *d_C_global;
     cudaMalloc(&d_A, (size_t)N * N * sizeof(double));
     cudaMalloc(&d_B, (size_t)N * N * sizeof(double));
     cudaMalloc(&d_C_global, (size_t)N * N * sizeof(double));
 
-    // 為每個 stream 分配 tile buffers 和 work buffers
+    // 為每個 stream 分配 buffers (需要更多 work buffers 給 fused kernels)
     double *d_A_tiles[NUM_STREAMS], *d_B_tiles[NUM_STREAMS], *d_C_tiles[NUM_STREAMS];
-    double *d_work_buffers[NUM_STREAMS][20];
+    double *d_work_buffers[NUM_STREAMS][29];  // 增加到 29 個 buffers
     
     for(int s = 0; s < NUM_STREAMS; s++){
         cudaMalloc(&d_A_tiles[s], tile_bytes);
         cudaMalloc(&d_B_tiles[s], tile_bytes);
         cudaMalloc(&d_C_tiles[s], tile_bytes);
         
-        for(int i = 0; i < 20; i++){
+        for(int i = 0; i < 29; i++){
             cudaMalloc(&d_work_buffers[s][i], quad_bytes);
         }
     }
@@ -336,26 +426,24 @@ int main(int argc, char **argv){
     int acc_threads = 1024;
     int acc_blocks = (TILE * TILE + acc_threads - 1) / acc_threads;
 
-    // 創建多個 CUDA streams
+    // 創建 CUDA streams
     cudaStream_t streams[NUM_STREAMS];
     for(int s = 0; s < NUM_STREAMS; s++){
         cudaStreamCreate(&streams[s]);
     }
 
-    printf("Computing tiled Strassen with %d streams...\n", NUM_STREAMS);
+    printf("Computing tiled Strassen with Kernel Fusion and %d streams...\n", NUM_STREAMS);
 
     auto chrono_start = std::chrono::steady_clock::now();
     
-    // 主迴圈：使用多 streams 平行化
+    // 主迴圈
     int stream_idx = 0;
     for(int ti = 0; ti < tiles; ++ti){
         for(int tj = 0; tj < tiles; ++tj){
-            // 選擇當前 stream
             int s = stream_idx % NUM_STREAMS;
             cudaStream_t stream = streams[s];
             
             for(int tk = 0; tk < tiles; ++tk){
-                // 從全域矩陣提取 tile
                 int A_row_offset = ti * TILE;
                 int A_col_offset = tk * TILE;
                 int B_row_offset = tk * TILE;
@@ -371,11 +459,10 @@ int main(int argc, char **argv){
                            TILE * sizeof(double), TILE,
                            cudaMemcpyDeviceToDevice, stream);
                 
-                // 使用 Strassen 計算 C_tile = A_tile * B_tile
-                strassen_tile_multiply(d_A_tiles[s], d_B_tiles[s], d_C_tiles[s], 
-                                     TILE, d_work_buffers[s], stream);
+                // 使用 kernel fusion 版本的 Strassen
+                strassen_tile_multiply_fused(d_A_tiles[s], d_B_tiles[s], d_C_tiles[s], 
+                                           TILE, d_work_buffers[s], stream);
                 
-                // 累加到全域 C 矩陣（使用 atomic add）
                 int C_row_offset = ti * TILE;
                 int C_col_offset = tj * TILE;
                 accumulate_kernel<<<acc_blocks, acc_threads, 0, stream>>>(
@@ -411,7 +498,7 @@ int main(int argc, char **argv){
         cudaFree(d_A_tiles[s]);
         cudaFree(d_B_tiles[s]);
         cudaFree(d_C_tiles[s]);
-        for(int i = 0; i < 20; i++){
+        for(int i = 0; i < 29; i++){
             cudaFree(d_work_buffers[s][i]);
         }
     }
