@@ -15,7 +15,8 @@ MODE="${MODE_ARG:-${MODE:-both}}"   # seq, par, block, both (seq+par), all (seq+
 # SRUN prefix for GPU runs (can be overridden outside)
 SRUN=${SRUN:-"srun -p nvidia -n1 --gres=gpu:1"}
 # NVPROF or other profiler prefix (empty by default)
-NVPROF=${NVPROF:-""}
+NVPROF_ARG="$2"
+NVPROF=${NVPROF_ARG:-""}
 
 # ==========================================================
 # 參數配置
