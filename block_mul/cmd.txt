@@ -1,8 +1,0 @@
-nvcc -std=c++11 -O3 -Xptxas="-v" -arch=sm_61 -o ./exe/bm_gmem ./block_mul/block_mul_gmem.cu  -lm
-srun -p nvidia -n1 --gres=gpu:1 nvprof exe/bm_shmem 2> block_mul/perfile/shmem/64.txt
-srun -p nvidia -n1 --gres=gpu:1 nvprof --metrics gld_transactions_per_request,global_load_requests,gld_transactions,stall_memory_dependency,dram_read_throughput,gld_throughput,achieved_occupancy,sm_efficiency exe/bm_gmem 4096 2> block_mul/profile/gmem/metrics.txt
-srun -p nvidia -n1 --gres=gpu:1 nvprof --metrics shared_load_transactions_per_request,shared_load,shared_load_transactions,shared_load_throughput,shared_store_transactions_per_request,shared_storeshared_store_transactions,shared_store_throughputshared_utilization, exe/bm_coal 2048 2> block/profile/coal/metrics_share_2048.txt
-
-
-
-
