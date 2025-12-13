@@ -154,30 +154,44 @@ int main(int argc, char* argv[]){
 
 void load_matrix(double **mat_ptr, int N_dim, const char *filename) {
     long long size = (long long)N_dim * N_dim;
-    size_t bytes = size * sizeof(double);
-    
-    FILE *file = fopen(filename, "rb"); 
+    size_t bytes_f = size * sizeof(float);
+    size_t bytes_d = size * sizeof(double);
+
+    FILE *file = fopen(filename, "rb");
     if (file == NULL) {
         fprintf(stderr, "Error: Cannot open file %s\n", filename);
         exit(EXIT_FAILURE);
     }
 
-    *mat_ptr = (double *)malloc(bytes);
-    if (*mat_ptr == NULL) {
-        perror("Host malloc failed in load_matrix");
+    // read as float then convert to double (dataset produced float32)
+    float *tmp = (float *)malloc(bytes_f);
+    if (tmp == NULL) {
+        perror("malloc failed for tmp float buffer");
         fclose(file);
         exit(EXIT_FAILURE);
     }
 
-    size_t read_count = fread(*mat_ptr, sizeof(double), size, file);
+    size_t read_count = fread(tmp, sizeof(float), size, file);
     if (read_count != size) {
-        fprintf(stderr, "Error: Read incomplete from %s. Expected %lld elements, read %zu.\n", 
+        fprintf(stderr, "Error: Read incomplete from %s. Expected %lld elements, read %zu.\n",
                 filename, size, read_count);
+        free(tmp);
         fclose(file);
         exit(EXIT_FAILURE);
     }
-
     fclose(file);
+
+    *mat_ptr = (double *)malloc(bytes_d);
+    if (*mat_ptr == NULL) {
+        perror("Host malloc failed in load_matrix (double)");
+        free(tmp);
+        exit(EXIT_FAILURE);
+    }
+
+    for (long long i = 0; i < size; ++i) {
+        (*mat_ptr)[i] = (double)tmp[i];
+    }
+    free(tmp);
 }
 
 void correctness_check(const double *C_true, const double *C_result, int N){

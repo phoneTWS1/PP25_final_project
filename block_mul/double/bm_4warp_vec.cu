@@ -20,8 +20,8 @@ __inline__ __device__ double warpReduceSum(double val) {
     return val;
 }
 // every wrap is reposible for 4 row of a C tile
-// every thread is reposible for 4 rows elements (same column)
-// grid = dim3(n,n), block = dim3(32,8)
+// every thread is reposible for 4 * 2 elememts
+// grid = dim3(n,n), block = dim3(16,8)
 __global__ void block_mul_kernel(
     int N,
     int n,
@@ -42,54 +42,97 @@ __global__ void block_mul_kernel(
     int B_start_col = by * Bs;
     
     // block local index
-    int lx = threadIdx.y; // threadIdx.y = 0...7, 
-    int ly = threadIdx.x; // threadIdx.x = 0...31
-    int wrap_row = lx * 4;
+    int lx = threadIdx.y; // threadIdx.y = 0...8, 
+    int ly = threadIdx.x; // threadIdx.x = 0...15
+    int stride = blockDim.y;
+
+    int grow1 = lx + stride;
+    int grow2 = grow1 + stride;
+    int grow3 = grow2 + stride;
+
+    int row0 = lx * Bs;
+    int row1 = grow1 * Bs;
+    int row2 = grow2 * Bs;
+    int row3 = grow3 * Bs;
 
 
-    double c0=0, c1=0, c2=0, c3=0;
+    int col0 = ly;
+    int col1 = ly + blockDim.x;
 
-    // compute c
+
+    double c00=0, c01=0, c10=0, c11=0, c20=0, c21=0, c30=0, c31=0;
+    double a0=0, a1=0, a2=0, a3=0, b0=0, b1=0;
+
+   // compute c
     for(int bk = 0; bk< n ; bk++){
         A_start_col = bk * Bs;
         B_start_row = bk * Bs;
         
         // load A, B block
-        A_block[wrap_row * Bs + ly] = d_A[(A_start_row + wrap_row) * N + A_start_col + ly];
-        A_block[(wrap_row + 1) * Bs + ly] = d_A[(A_start_row + wrap_row + 1) * N + A_start_col + ly];
-        A_block[(wrap_row + 2) * Bs + ly] = d_A[(A_start_row + wrap_row + 2) * N + A_start_col + ly];
-        A_block[(wrap_row + 3) * Bs + ly] = d_A[(A_start_row + wrap_row + 3) * N + A_start_col + ly];
+        for (int r = lx; r < Bs; r += stride) {
+            int aRow = A_start_row + r;
+            int bRow = B_start_row + r;
 
-        B_block[wrap_row * Bs + ly] = d_B[(B_start_row + wrap_row) * N + B_start_col + ly];
-        B_block[(wrap_row + 1) * Bs + ly] = d_B[(B_start_row + wrap_row + 1) * N + B_start_col + ly];
-        B_block[(wrap_row + 2) * Bs + ly] = d_B[(B_start_row + wrap_row + 2) * N + B_start_col + ly];
-        B_block[(wrap_row + 3) * Bs + ly] = d_B[(B_start_row + wrap_row + 3) * N + B_start_col + ly];
+            const double2* srcA = reinterpret_cast<const double2*>(
+                &d_A[aRow * N + A_start_col]
+            );
+            const double2* srcB = reinterpret_cast<const double2*>(
+                &d_B[bRow * N + B_start_col]
+            );
+
+            // Bs/2 = 16 double2 per row. Threads in x (0..15) share them.
+            for (int cvec = ly; cvec < Bs / 2; cvec += blockDim.x) {
+                double2 vA = srcA[cvec];  // cols 2*cvec, 2*cvec+1
+                double2 vB = srcB[cvec];
+
+                int c0 = 2 * cvec;
+                int c1 = c0 + 1;
+
+                // scatter into shared A_block and B_block (row-major)
+                A_block[r * Bs + c0] = vA.x;
+                A_block[r * Bs + c1] = vA.y;
+
+                B_block[r * Bs + c0] = vB.x;
+                B_block[r * Bs + c1] = vB.y;
+            }
+        }
 
         __syncthreads();
         
         #pragma unroll 32
         for(int k = 0 ; k < Bs ; k ++){
-            double b = B_block[k * Bs + ly];
-            double a0 = A_block[(wrap_row * Bs) + k];
-            double a1 = A_block[(wrap_row + 1) * Bs + k];
-            double a2 = A_block[(wrap_row + 2) * Bs + k];
-            double a3 = A_block[(wrap_row + 3) * Bs + k];
+            b0 = B_block[k * Bs + col0];
+            b1 = B_block[k * Bs + col1];
+            
+            a0 = A_block[row0 + k];
+            a1 = A_block[row1 + k];
+            a2 = A_block[row2 + k];
+            a3 = A_block[row3 + k];
 
-            // 4FMAs, 5 shared load  =>  0.8 FMAs/load;
-            c0 += a0 * b;
-            c1 += a1 * b;
-            c2 += a2 * b;
-            c3 += a3 * b;
+            c00 += a0 * b0;
+            c01 += a0 * b1;
+            c10 += a1 * b0;
+            c11 += a1 * b1;
+            c20 += a2 * b0;
+            c21 += a2 * b1;
+            c30 += a3 * b0;
+            c31 += a3 * b1;
+        
         }
-
         __syncthreads();
     }
 
     //write back
-    d_C[(A_start_row + wrap_row) * N + B_start_col + ly] = c0;
-    d_C[(A_start_row + wrap_row + 1) * N + B_start_col + ly] = c1;
-    d_C[(A_start_row + wrap_row + 2) * N + B_start_col + ly] = c2;
-    d_C[(A_start_row + wrap_row + 3) * N + B_start_col + ly] = c3;
+    d_C[(A_start_row + lx) * N + B_start_col + col0] = c00;
+    d_C[(A_start_row + lx) * N + B_start_col + col1] = c01;
+    d_C[(A_start_row + grow1) * N + B_start_col + col0] = c10;
+    d_C[(A_start_row + grow1) * N + B_start_col + col1] = c11;
+    d_C[(A_start_row + grow2) * N + B_start_col + col0] = c20;
+    d_C[(A_start_row + grow2) * N + B_start_col + col1] = c21;
+    d_C[(A_start_row + grow3) * N + B_start_col + col0] = c30;
+    d_C[(A_start_row + grow3) * N + B_start_col + col1] = c31;
+
+
 }
 
 int main(int argc, char* argv[]){
@@ -125,7 +168,7 @@ int main(int argc, char* argv[]){
 
     //launch kernel
     size_t shmem = Bs * Bs * 2 * sizeof(double);
-    block_mul_kernel<<<dim3(n,n), dim3(Bs,8), shmem>>>(
+    block_mul_kernel<<<dim3(n,n), dim3(16,8), shmem>>>(
         N,
         n,
         d_A,
@@ -142,7 +185,7 @@ int main(int argc, char* argv[]){
     cudaFree(d_B);
     cudaFree(d_C);
 
-   correctness_check(C_true, C, N);
+    correctness_check(C_true, C, N);
 
     
     return 0;
