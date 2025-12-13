@@ -296,33 +296,33 @@ Device "NVIDIA GeForce GTX 1080 (0)"
 # Vectorization
 ## 8 warp
 <pre style="overflow-x:auto; white-space:pre;">
-==3129527== Metric result:
+==3159977== Metric result:
 Invocations                               Metric Name                                         Metric Description         Min         Max         Avg
 Device "NVIDIA GeForce GTX 1080 (0)"
     Kernel: block_mul_kernel(int, int, double*, double*, double*)
-          1                          gld_transactions                                   Global Load Transactions  8589934594  8589934594  8589934594
-          1                      global_load_requests   Total number of global load requests from Multiprocessor   536870912   536870912   536870912
+          1                          gld_transactions                                   Global Load Transactions  4294967298  4294967298  4294967298
+          1                      global_load_requests   Total number of global load requests from Multiprocessor   268435456   268435456   268435456
           1                          gst_transactions                                  Global Store Transactions     4194304     4194304     4194304
-          1                      dram_read_throughput                              Device Memory Read Throughput  32.735GB/s  32.735GB/s  32.735GB/s
-          1                   stall_memory_dependency                         Issue Stall Reasons (Data Request)       1.44%       1.44%       1.44%
-          1                     stall_exec_dependency                 Issue Stall Reasons (Execution Dependency)      67.19%      67.19%      67.19%
-          1                        achieved_occupancy                                         Achieved Occupancy    0.624398    0.624398    0.624398
-          1                             sm_efficiency                                    Multiprocessor Activity      99.90%      99.90%      99.90%
+          1                      dram_read_throughput                              Device Memory Read Throughput  35.436GB/s  35.436GB/s  35.436GB/s
+          1                   stall_memory_dependency                         Issue Stall Reasons (Data Request)       1.64%       1.64%       1.64%
+          1                     stall_exec_dependency                 Issue Stall Reasons (Execution Dependency)      51.57%      51.57%      51.57%
+          1                        achieved_occupancy                                         Achieved Occupancy    0.749045    0.749045    0.749045
+          1                             sm_efficiency                                    Multiprocessor Activity      99.82%      99.82%      99.82%
           1                  shared_load_transactions                                   Shared Load Transactions  3221225472  3221225472  3221225472
-          1                    shared_load_throughput                              Shared Memory Load Throughput  644.37GB/s  644.37GB/s  644.37GB/s
-          1                 shared_store_transactions                                  Shared Store Transactions  1342177280  1342177280  1342177280
-          1                   shared_store_throughput                             Shared Memory Store Throughput  268.49GB/s  268.49GB/s  268.49GB/s
-          1                         shared_efficiency                                   Shared Memory Efficiency      32.35%      32.35%      32.35%
+          1                    shared_load_throughput                              Shared Memory Load Throughput  670.45GB/s  670.45GB/s  670.45GB/s
+          1                 shared_store_transactions                                  Shared Store Transactions   268435456   268435456   268435456
+          1                   shared_store_throughput                             Shared Memory Store Throughput  55.870GB/s  55.870GB/s  55.870GB/s
+          1                         shared_efficiency                                   Shared Memory Efficiency      42.31%      42.31%      42.31%
           1                        shared_utilization                                  Shared Memory Utilization     Low (2)     Low (2)     Low (2)
           1                                inst_fp_64                                    FP Instructions(Double)  6.8719e+10  6.8719e+10  6.8719e+10
           1                             flop_count_dp                Floating Point Operations(Double Precision)  1.3744e+11  1.3744e+11  1.3744e+11
-          1                        flop_dp_efficiency                               FLOP Efficiency(Peak Double)      75.13%      75.13%      75.13%
+          1                        flop_dp_efficiency                               FLOP Efficiency(Peak Double)      79.02%      79.02%      79.02%
 
-==3111805== Profiling result:
+==3159938== Profiling result:
             Type  Time(%)      Time     Calls       Avg       Min       Max  Name
- GPU activities:   82.58%  590.23ms         1  590.23ms  590.23ms  590.23ms  block_mul_kernel(int, int, double*, double*, double*)
-                    9.11%  65.124ms         1  65.124ms  65.124ms  65.124ms  [CUDA memcpy DtoH]
-                    8.30%  59.349ms         2  29.674ms  29.570ms  29.779ms  [CUDA memcpy HtoD]
+ GPU activities:   83.00%  564.52ms         1  564.52ms  564.52ms  564.52ms  block_mul_kernel(int, int, double*, double*, double*)
+                    8.59%  58.437ms         2  29.219ms  29.200ms  29.237ms  [CUDA memcpy HtoD]
+                    8.41%  57.182ms         1  57.182ms  57.182ms  57.182ms  [CUDA memcpy DtoH]
 </pre>
 ## 4 warp
 <pre style="overflow-x:auto; white-space:pre;">
